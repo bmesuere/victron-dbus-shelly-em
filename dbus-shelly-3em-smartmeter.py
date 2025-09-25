@@ -65,7 +65,7 @@ class DbusShelly3emService:
         self._dbusservice.add_path("/Mgmt/ProcessName", __file__)
         self._dbusservice.add_path(
             "/Mgmt/ProcessVersion",
-            "Unkown version, and running on Python " + platform.python_version(),
+            "Unknown version, and running on Python " + platform.python_version(),
         )
         self._dbusservice.add_path("/Mgmt/Connection", connection)
 
@@ -74,7 +74,7 @@ class DbusShelly3emService:
         self._dbusservice.add_path("/ProductId", productid)
         self._dbusservice.add_path(
             "/DeviceType", 345
-        )  # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Engerie Meter
+        )  # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Energy Meter
         self._dbusservice.add_path("/ProductName", productname)
         self._dbusservice.add_path("/CustomName", customname)
         self._dbusservice.add_path("/Latency", None)
@@ -84,7 +84,7 @@ class DbusShelly3emService:
         self._dbusservice.add_path("/Role", role)
         self._dbusservice.add_path(
             "/Position", self._getShellyPosition()
-        )  # normaly only needed for pvinverter
+        )  # normally only needed for pvinverter
         self._dbusservice.add_path("/Serial", self._getShellySerial())
         self._dbusservice.add_path("/UpdateIndex", 0)
 
@@ -108,7 +108,7 @@ class DbusShelly3emService:
         gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
 
     def _getShellySerial(self):
-        meter_data = self._getShellyData()
+        meter_data = self._getShellyData()  # request/parse Shelly status
 
         if not meter_data["mac"]:
             raise ValueError("Response does not contain 'mac' attribute")
@@ -139,7 +139,16 @@ class DbusShelly3emService:
             headers={"Accept": "application/json"},
         )
         # Raise for HTTP errors (4xx/5xx)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as e:
+            logging.critical(
+                "HTTP error from Shelly at %s/status: %s",
+                self.shelly_base,
+                e,
+                exc_info=e,
+            )
+            raise
 
         try:
             meter_data = r.json()
@@ -227,7 +236,7 @@ class DbusShelly3emService:
                 % (self._dbusservice["/Ac/Energy/Forward"])
             )
             logging.debug(
-                "House Reverse (/Ac/Energy/Revers): %s"
+                "House Reverse (/Ac/Energy/Reverse): %s"
                 % (self._dbusservice["/Ac/Energy/Reverse"])
             )
             logging.debug("---")
@@ -246,7 +255,8 @@ class DbusShelly3emService:
             ConnectionError,
         ) as e:
             logging.critical(
-                "Error getting data from Shelly - check network or Shelly status. Setting power values to 0. Details: %s",
+                "Error getting data from Shelly at %s - check network or device status. Setting power values to 0. Details: %s",
+                self.shelly_base,
                 e,
                 exc_info=e,
             )
