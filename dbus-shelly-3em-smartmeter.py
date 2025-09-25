@@ -17,6 +17,11 @@ if VIC_TRON_PATH not in sys.path:
   sys.path.insert(1, VIC_TRON_PATH)
 from vedbus import VeDbusService
 
+# Config & HTTP constants
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini")
+DEFAULT_TIMEOUT = 5
+SESSION = requests.Session()
+
 
 class DbusShelly3emService:
   def __init__(self, paths, productname='Shelly 3EM', connection='Shelly 3EM HTTP JSON service'):
@@ -40,7 +45,7 @@ class DbusShelly3emService:
     self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance))
     self._paths = paths
  
-    logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
+    logging.debug("%s /DeviceInstance = %d", servicename, deviceinstance)
  
     # Create the management objects, as specified in the ccgx dbus-api document
     self._dbusservice.add_path('/Mgmt/ProcessName', __file__)
@@ -88,8 +93,15 @@ class DbusShelly3emService:
  
   def _getConfig(self):
     config = configparser.ConfigParser()
-    config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
-    return config;
+    config.read(CONFIG_PATH)
+    # Basic validation — keep behavior the same but fail fast on obviously broken configs
+    if 'DEFAULT' not in config:
+      raise ValueError("Missing [DEFAULT] section in %s" % CONFIG_PATH)
+    access_type = config['DEFAULT'].get('AccessType', '').strip()
+    if access_type == 'OnPremise':
+      if 'ONPREMISE' not in config or not config['ONPREMISE'].get('Host'):
+        raise ValueError("AccessType OnPremise requires [ONPREMISE] with Host in %s" % CONFIG_PATH)
+    return config
  
  
   def _getSignOfLifeInterval(self):
@@ -120,10 +132,7 @@ class DbusShelly3emService:
  
   def _getShellyData(self):
     URL = self._getShellyStatusUrl()
-    meter_r = requests.get(url=URL, timeout=5)
-
-    if not meter_r:
-        raise ConnectionError("No response from Shelly 3EM - %s" % (URL))
+    meter_r = SESSION.get(url=URL, timeout=DEFAULT_TIMEOUT)
 
     meter_r.raise_for_status()
     meter_data = meter_r.json()
@@ -136,8 +145,8 @@ class DbusShelly3emService:
  
   def _signOfLife(self):
     logging.info("--- Start: sign of life ---")
-    logging.info("Last _update() call: %s" % (self._lastUpdate))
-    logging.info("Last '/Ac/Power': %s" % (self._dbusservice['/Ac/Power']))
+    logging.info("Last _update() call: %s", self._lastUpdate)
+    logging.info("Last '/Ac/Power': %s", self._dbusservice['/Ac/Power'])
     logging.info("--- End: sign of life ---")
     return True
  
@@ -190,9 +199,9 @@ class DbusShelly3emService:
       )
 
       #logging
-      logging.debug("House Consumption (/Ac/Power): %s" % (self._dbusservice['/Ac/Power']))
-      logging.debug("House Forward (/Ac/Energy/Forward): %s" % (self._dbusservice['/Ac/Energy/Forward']))
-      logging.debug("House Reverse (/Ac/Energy/Reverse): %s" % (self._dbusservice['/Ac/Energy/Reverse']))
+      logging.debug("House Consumption (/Ac/Power): %s", self._dbusservice['/Ac/Power'])
+      logging.debug("House Forward (/Ac/Energy/Forward): %s", self._dbusservice['/Ac/Energy/Forward'])
+      logging.debug("House Reverse (/Ac/Energy/Reverse): %s", self._dbusservice['/Ac/Energy/Reverse'])
       logging.debug("---");
       
       # increment UpdateIndex - to show that new data is available an wrap
@@ -214,7 +223,7 @@ class DbusShelly3emService:
     return True
  
   def _handlechangedvalue(self, path, value):
-    logging.debug("someone else updated %s to %s" % (path, value))
+    logging.debug("someone else updated %s to %s", path, value)
     return True # accept the change
 
 
@@ -222,7 +231,7 @@ class DbusShelly3emService:
 
 def getLogLevel():
   config = configparser.ConfigParser()
-  config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
+  config.read(CONFIG_PATH)
   logLevelString = config['DEFAULT']['LogLevel']
   
   if logLevelString:
@@ -235,16 +244,23 @@ def getLogLevel():
 
 def main():
   #configure logging
-  logging.basicConfig(      format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
-                            datefmt='%Y-%m-%d %H:%M:%S',
-                            level=getLogLevel(),
+  logging.basicConfig(
+    format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    level=getLogLevel(),
+    handlers=[
+      logging.FileHandler(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'current.log')),
+      logging.StreamHandler()
+    ]
+  ),
                             handlers=[
                                 logging.FileHandler("%s/current.log" % (os.path.dirname(os.path.realpath(__file__)))),
                                 logging.StreamHandler()
                             ])
  
   try:
-      logging.info("Start");
+      logging.info("Start")
+      logging.info("Using config file: %s", CONFIG_PATH)
   
       from dbus.mainloop.glib import DBusGMainLoop
       # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
