@@ -1,24 +1,21 @@
 #!/usr/bin/env python
 # vim: ts=2 sw=2 et
 
-# import normal packages
-import platform 
+# Standard library
+import platform
 import logging
-import logging.handlers
 import sys
 import os
-import sys
-if sys.version_info.major == 2:
-    import gobject
-else:
-    from gi.repository import GLib as gobject
-import sys
 import time
-import requests # for http GET
-import configparser # for config/ini file
- 
-# our own packages from victron
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python'))
+import requests  # HTTP GET
+import configparser  # INI config
+from gi.repository import GLib as gobject
+
+# Victron libs (velib_python)
+# Use absolute path; the original os.path.join swallowed the prefix due to a leading slash.
+VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
+if VIC_TRON_PATH not in sys.path:
+  sys.path.insert(1, VIC_TRON_PATH)
 from vedbus import VeDbusService
 
 
@@ -303,3 +300,4 @@ def main():
     logging.critical('Error at %s', 'main', exc_info=e)
 if __name__ == "__main__":
   main()
+  
