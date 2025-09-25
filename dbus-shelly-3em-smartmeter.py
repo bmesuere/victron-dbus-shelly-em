@@ -31,11 +31,11 @@ class DbusShelly3emService:
     else:
         logging.error("Configured Role '%s' is not allowed. Allowed: %s", role, allowed_roles)
         exit(1)
+
     if role == 'pvinverter':
         productid = 0xA144
     else:
         productid = 45069
-
 
     self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance))
     self._paths = paths
@@ -69,6 +69,8 @@ class DbusShelly3emService:
  
     # last update
     self._lastUpdate = 0
+    # timestamp for energy integration (kWh)
+    self._lastEnergyTs = time.time()
  
     # add _update function 'timer'
     gobject.timeout_add(500, self._update) # pause 500ms before the next request
@@ -182,14 +184,28 @@ class DbusShelly3emService:
       #self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/L1/Energy/Forward'] + self._dbusservice['/Ac/L2/Energy/Forward'] + self._dbusservice['/Ac/L3/Energy/Forward']
       #self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/L1/Energy/Reverse'] + self._dbusservice['/Ac/L2/Energy/Reverse'] + self._dbusservice['/Ac/L3/Energy/Reverse'] 
       
-      # New Version - from xris99
-      #Calc = 60min * 60 sec / 0.500 (refresh interval of 500ms) * 1000
-      if (self._dbusservice['/Ac/Power'] > 0):
-           self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/Energy/Forward'] + (self._dbusservice['/Ac/Power']/(60*60/0.5*1000))            
-      if (self._dbusservice['/Ac/Power'] < 0):
-           self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/Energy/Reverse'] + (self._dbusservice['/Ac/Power']*-1/(60*60/0.5*1000))
+      # Aggregate values expected by Venus OS
+      self._dbusservice['/Ac/Voltage'] = self._dbusservice['/Ac/L1/Voltage']
+      self._dbusservice['/Ac/Current'] = (
+        self._dbusservice['/Ac/L1/Current'] +
+        self._dbusservice['/Ac/L2/Current'] +
+        self._dbusservice['/Ac/L3/Current']
+      )
 
-      
+      # Energy integration with real dt (W → kWh)
+      now_ts = time.time()
+      dt = now_ts - getattr(self, '_lastEnergyTs', now_ts)
+      if dt <= 0:
+        dt = 0.5  # fallback to timer interval
+
+      p = float(self._dbusservice['/Ac/Power'])  # W
+      incr_fwd = max(p, 0.0) * dt / 3600000.0
+      incr_rev = max(-p, 0.0) * dt / 3600000.0
+
+      self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/Energy/Forward'] + incr_fwd
+      self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/Energy/Reverse'] + incr_rev
+      self._lastEnergyTs = now_ts
+
       #logging
       logging.debug("House Consumption (/Ac/Power): %s" % (self._dbusservice['/Ac/Power']))
       logging.debug("House Forward (/Ac/Energy/Forward): %s" % (self._dbusservice['/Ac/Energy/Forward']))
@@ -293,3 +309,4 @@ def main():
     logging.critical('Error at %s', 'main', exc_info=e)
 if __name__ == "__main__":
   main()
+  
