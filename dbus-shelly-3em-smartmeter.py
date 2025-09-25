@@ -22,10 +22,10 @@ class DbusShelly3emService:
     def __init__(
         self, paths, productname="Shelly 3EM", connection="Shelly 3EM HTTP JSON service"
     ):
-        config = self._getConfig()
-        deviceinstance = int(config["DEFAULT"]["DeviceInstance"])
-        customname = config["DEFAULT"]["CustomName"]
-        role = config["DEFAULT"]["Role"]
+        self.config = self._getConfig()
+        deviceinstance = int(self.config["DEFAULT"]["DeviceInstance"])
+        customname = self.config["DEFAULT"]["CustomName"]
+        role = self.config["DEFAULT"]["Role"]
 
         allowed_roles = ["pvinverter", "grid"]
         if role in allowed_roles:
@@ -111,37 +111,27 @@ class DbusShelly3emService:
         return config
 
     def _getSignOfLifeInterval(self):
-        config = self._getConfig()
-        value = config["DEFAULT"]["SignOfLifeLog"]
-
-        if not value:
-            value = 0
-
-        return int(value)
+        value = self.config["DEFAULT"].get("SignOfLifeLog", "0").strip()
+        return int(value or 0)
 
     def _getShellyPosition(self):
-        config = self._getConfig()
-        value = config["DEFAULT"]["Position"]
-
-        if not value:
-            value = 0
-
-        return int(value)
+        value = self.config["DEFAULT"].get("Position", "0").strip()
+        return int(value or 0)
 
     def _getShellyStatusUrl(self):
-        config = self._getConfig()
-        accessType = config["DEFAULT"]["AccessType"]
+        accessType = self.config["DEFAULT"]["AccessType"]
 
         if accessType == "OnPremise":
             URL = "http://%s:%s@%s/status" % (
-                config["ONPREMISE"]["Username"],
-                config["ONPREMISE"]["Password"],
-                config["ONPREMISE"]["Host"],
+                self.config["ONPREMISE"]["Username"],
+                self.config["ONPREMISE"]["Password"],
+                self.config["ONPREMISE"]["Host"],
             )
             URL = URL.replace(":@", "")
         else:
             raise ValueError(
-                "AccessType %s is not supported" % (config["DEFAULT"]["AccessType"])
+                "AccessType %s is not supported"
+                % (self.config["DEFAULT"]["AccessType"])
             )
 
         return URL
@@ -173,10 +163,9 @@ class DbusShelly3emService:
         try:
             # get data from Shelly 3em
             meter_data = self._getShellyData()
-            config = self._getConfig()
 
             try:
-                remapL1 = int(config["ONPREMISE"]["L1Position"])
+                remapL1 = int(self.config["ONPREMISE"]["L1Position"])
             except KeyError:
                 remapL1 = 1
 
