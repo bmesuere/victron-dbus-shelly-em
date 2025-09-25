@@ -21,17 +21,17 @@ from vedbus import VeDbusService
 
 class DbusShelly3emService:
   def __init__(self, paths, productname='Shelly 3EM', connection='Shelly 3EM HTTP JSON service'):
-    config = self._getConfig()
-    deviceinstance = int(config['DEFAULT']['DeviceInstance'])
-    customname = config['DEFAULT']['CustomName']
-    role = config['DEFAULT']['Role']
+    self.config = self._getConfig()
+    deviceinstance = int(self.config['DEFAULT']['DeviceInstance'])
+    customname = self.config['DEFAULT']['CustomName']
+    role = self.config['DEFAULT']['Role']
 
-    allowed_roles = ['pvinverter','grid']
+    allowed_roles = ['pvinverter', 'grid']
     if role in allowed_roles:
         servicename = 'com.victronenergy.' + role
     else:
-        logging.error("Configured Role: %s is not in the allowed list")
-        exit()
+        logging.error("Configured Role '%s' is not allowed. Allowed: %s", role, allowed_roles)
+        exit(1)
 
     if role == 'pvinverter':
         productid = 0xA144
@@ -45,7 +45,7 @@ class DbusShelly3emService:
  
     # Create the management objects, as specified in the ccgx dbus-api document
     self._dbusservice.add_path('/Mgmt/ProcessName', __file__)
-    self._dbusservice.add_path('/Mgmt/ProcessVersion', 'Unkown version, and running on Python ' + platform.python_version())
+    self._dbusservice.add_path('/Mgmt/ProcessVersion', 'Unknown version, running on Python ' + platform.python_version())
     self._dbusservice.add_path('/Mgmt/Connection', connection)
  
     # Create the mandatory objects
@@ -59,7 +59,7 @@ class DbusShelly3emService:
     self._dbusservice.add_path('/HardwareVersion', 0)
     self._dbusservice.add_path('/Connected', 1)
     self._dbusservice.add_path('/Role', role)
-    self._dbusservice.add_path('/Position', self._getShellyPosition()) # normaly only needed for pvinverter
+    self._dbusservice.add_path('/Position', self._getShellyPosition()) # normally only needed for pvinverter
     self._dbusservice.add_path('/Serial', self._getShellySerial())
     self._dbusservice.add_path('/UpdateIndex', 0)
  
@@ -94,53 +94,48 @@ class DbusShelly3emService:
  
  
   def _getSignOfLifeInterval(self):
-    config = self._getConfig()
-    value = config['DEFAULT']['SignOfLifeLog']
-    
-    if not value: 
+    value = self.config['DEFAULT'].get('SignOfLifeLog', '0')
+    if not value:
         value = 0
-    
     return int(value)
  
  
   def _getShellyPosition(self):
-    config = self._getConfig()
-    value = config['DEFAULT']['Position']
-    
-    if not value: 
+    value = self.config['DEFAULT'].get('Position', '0')
+    if not value:
         value = 0
-    
     return int(value)
  
  
   def _getShellyStatusUrl(self):
-    config = self._getConfig()
-    accessType = config['DEFAULT']['AccessType']
-    
-    if accessType == 'OnPremise': 
-        URL = "http://%s:%s@%s/status" % (config['ONPREMISE']['Username'], config['ONPREMISE']['Password'], config['ONPREMISE']['Host'])
-        URL = URL.replace(":@", "")
+    accessType = self.config['DEFAULT']['AccessType']
+    if accessType == 'OnPremise':
+        username = self.config['ONPREMISE'].get('Username', '')
+        password = self.config['ONPREMISE'].get('Password', '')
+        host = self.config['ONPREMISE']['Host']
+        if username or password:
+            URL = "http://%s:%s@%s/status" % (username, password, host)
+            URL = URL.replace(":@", "")
+        else:
+            URL = "http://%s/status" % host
     else:
-        raise ValueError("AccessType %s is not supported" % (config['DEFAULT']['AccessType']))
-    
+        raise ValueError("AccessType %s is not supported" % (self.config['DEFAULT']['AccessType']))
     return URL
     
  
   def _getShellyData(self):
     URL = self._getShellyStatusUrl()
-    meter_r = requests.get(url = URL, timeout=5)
-    
-    # check for response
+    meter_r = requests.get(url=URL, timeout=5)
+
     if not meter_r:
         raise ConnectionError("No response from Shelly 3EM - %s" % (URL))
-    
-    meter_data = meter_r.json()     
-    
-    # check for Json
+
+    meter_r.raise_for_status()
+    meter_data = meter_r.json()
+
     if not meter_data:
         raise ValueError("Converting response to JSON failed")
-    
-    
+
     return meter_data
  
  
@@ -153,9 +148,8 @@ class DbusShelly3emService:
  
   def _update(self):   
     try:
-      #get data from Shelly 3em
+      # get data from Shelly 3EM
       meter_data = self._getShellyData()
-      config = self._getConfig()
 
       try:
         remapL1 = int(config['ONPREMISE']['L1Position'])
