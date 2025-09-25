@@ -12,7 +12,6 @@ import configparser  # INI config
 from gi.repository import GLib as gobject
 
 # Victron libs (velib_python)
-# Use absolute path; the original os.path.join swallowed the prefix due to a leading slash.
 VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
 if VIC_TRON_PATH not in sys.path:
   sys.path.insert(1, VIC_TRON_PATH)
@@ -32,11 +31,11 @@ class DbusShelly3emService:
     else:
         logging.error("Configured Role '%s' is not allowed. Allowed: %s", role, allowed_roles)
         exit(1)
-
     if role == 'pvinverter':
         productid = 0xA144
     else:
         productid = 45069
+
 
     self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance))
     self._paths = paths
@@ -94,17 +93,13 @@ class DbusShelly3emService:
  
  
   def _getSignOfLifeInterval(self):
-    value = self.config['DEFAULT'].get('SignOfLifeLog', '0')
-    if not value:
-        value = 0
-    return int(value)
+    value = self.config['DEFAULT'].get('SignOfLifeLog', '0').strip()
+    return int(value or 0)
  
  
   def _getShellyPosition(self):
-    value = self.config['DEFAULT'].get('Position', '0')
-    if not value:
-        value = 0
-    return int(value)
+    value = self.config['DEFAULT'].get('Position', '0').strip()
+    return int(value or 0)
  
  
   def _getShellyStatusUrl(self):
@@ -152,14 +147,18 @@ class DbusShelly3emService:
       meter_data = self._getShellyData()
 
       try:
-        remapL1 = int(config['ONPREMISE']['L1Position'])
-      except KeyError:
+        remapL1 = int(self.config['ONPREMISE'].get('L1Position', '1'))
+      except (KeyError, ValueError):
         remapL1 = 1
 
-      if remapL1 > 1:
+      # clamp to valid range (1..3) for 3-phase meters
+      if remapL1 not in (1, 2, 3):
+        remapL1 = 1
+
+      if remapL1 > 1 and len(meter_data.get('emeters', [])) >= 3:
         old_l1 = meter_data['emeters'][0]
-        meter_data['emeters'][0] = meter_data['emeters'][remapL1-1]
-        meter_data['emeters'][remapL1-1] = old_l1
+        meter_data['emeters'][0] = meter_data['emeters'][remapL1 - 1]
+        meter_data['emeters'][remapL1 - 1] = old_l1
        
       #send data to DBus
       self._dbusservice['/Ac/Power'] = meter_data['total_power']
@@ -194,7 +193,7 @@ class DbusShelly3emService:
       #logging
       logging.debug("House Consumption (/Ac/Power): %s" % (self._dbusservice['/Ac/Power']))
       logging.debug("House Forward (/Ac/Energy/Forward): %s" % (self._dbusservice['/Ac/Energy/Forward']))
-      logging.debug("House Reverse (/Ac/Energy/Revers): %s" % (self._dbusservice['/Ac/Energy/Reverse']))
+      logging.debug("House Reverse (/Ac/Energy/Reverse): %s" % (self._dbusservice['/Ac/Energy/Reverse']))
       logging.debug("---");
       
       # increment UpdateIndex - to show that new data is available an wrap
@@ -294,4 +293,3 @@ def main():
     logging.critical('Error at %s', 'main', exc_info=e)
 if __name__ == "__main__":
   main()
-  
