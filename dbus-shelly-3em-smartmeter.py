@@ -43,6 +43,17 @@ class DbusShelly3emService:
         else:
             productid = 45069
 
+        # Reuse one HTTP session for all requests
+        self.session = requests.Session()
+        self._request_timeout = 5
+
+        # Shelly connection settings derived once
+        host = self.config["ONPREMISE"]["Host"].strip()
+        self.shelly_base = "http://%s" % host
+        username = self.config["ONPREMISE"].get("Username", "").strip()
+        password = self.config["ONPREMISE"].get("Password", "")
+        self.auth = (username, password) if username else None
+
         self._dbusservice = VeDbusService(
             "{}.http_{:02d}".format(servicename, deviceinstance)
         )
@@ -118,37 +129,25 @@ class DbusShelly3emService:
         value = self.config["DEFAULT"].get("Position", "0").strip()
         return int(value or 0)
 
-    def _getShellyStatusUrl(self):
-        accessType = self.config["DEFAULT"]["AccessType"]
-
-        if accessType == "OnPremise":
-            URL = "http://%s:%s@%s/status" % (
-                self.config["ONPREMISE"]["Username"],
-                self.config["ONPREMISE"]["Password"],
-                self.config["ONPREMISE"]["Host"],
-            )
-            URL = URL.replace(":@", "")
-        else:
-            raise ValueError(
-                "AccessType %s is not supported"
-                % (self.config["DEFAULT"]["AccessType"])
-            )
-
-        return URL
-
     def _getShellyData(self):
-        URL = self._getShellyStatusUrl()
-        meter_r = requests.get(url=URL, timeout=5)
+        URL = self.shelly_base + "/status"
 
-        # check for response
-        if not meter_r:
-            raise ConnectionError("No response from Shelly 3EM - %s" % (URL))
+        r = self.session.get(
+            url=URL,
+            timeout=self._request_timeout,
+            auth=self.auth,
+            headers={"Accept": "application/json"},
+        )
+        # Raise for HTTP errors (4xx/5xx)
+        r.raise_for_status()
 
-        meter_data = meter_r.json()
+        try:
+            meter_data = r.json()
+        except ValueError as e:
+            raise ValueError("Invalid JSON from Shelly at %s: %s" % (URL, e))
 
-        # check for Json
-        if not meter_data:
-            raise ValueError("Converting response to JSON failed")
+        if not isinstance(meter_data, dict):
+            raise ValueError("Unexpected JSON structure from Shelly at %s" % (URL))
 
         return meter_data
 
