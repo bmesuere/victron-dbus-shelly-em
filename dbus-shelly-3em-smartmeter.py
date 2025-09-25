@@ -69,8 +69,6 @@ class DbusShelly3emService:
  
     # last update
     self._lastUpdate = 0
-    # timestamp for energy integration (kWh)
-    self._lastEnergyTs = time.time()
  
     # add _update function 'timer'
     gobject.timeout_add(500, self._update) # pause 500ms before the next request
@@ -179,32 +177,17 @@ class DbusShelly3emService:
       self._dbusservice['/Ac/L1/Energy/Reverse'] = (meter_data['emeters'][0]['total_returned']/1000) 
       self._dbusservice['/Ac/L2/Energy/Reverse'] = (meter_data['emeters'][1]['total_returned']/1000) 
       self._dbusservice['/Ac/L3/Energy/Reverse'] = (meter_data['emeters'][2]['total_returned']/1000) 
-      
-      # Old version
-      #self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/L1/Energy/Forward'] + self._dbusservice['/Ac/L2/Energy/Forward'] + self._dbusservice['/Ac/L3/Energy/Forward']
-      #self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/L1/Energy/Reverse'] + self._dbusservice['/Ac/L2/Energy/Reverse'] + self._dbusservice['/Ac/L3/Energy/Reverse'] 
-      
-      # Aggregate values expected by Venus OS
-      self._dbusservice['/Ac/Voltage'] = self._dbusservice['/Ac/L1/Voltage']
-      self._dbusservice['/Ac/Current'] = (
-        self._dbusservice['/Ac/L1/Current'] +
-        self._dbusservice['/Ac/L2/Current'] +
-        self._dbusservice['/Ac/L3/Current']
+      # Aggregate total energy from phase counters
+      self._dbusservice['/Ac/Energy/Forward'] = (
+        self._dbusservice['/Ac/L1/Energy/Forward'] +
+        self._dbusservice['/Ac/L2/Energy/Forward'] +
+        self._dbusservice['/Ac/L3/Energy/Forward']
       )
-
-      # Energy integration with real dt (W → kWh)
-      now_ts = time.time()
-      dt = now_ts - getattr(self, '_lastEnergyTs', now_ts)
-      if dt <= 0:
-        dt = 0.5  # fallback to timer interval
-
-      p = float(self._dbusservice['/Ac/Power'])  # W
-      incr_fwd = max(p, 0.0) * dt / 3600000.0
-      incr_rev = max(-p, 0.0) * dt / 3600000.0
-
-      self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/Energy/Forward'] + incr_fwd
-      self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/Energy/Reverse'] + incr_rev
-      self._lastEnergyTs = now_ts
+      self._dbusservice['/Ac/Energy/Reverse'] = (
+        self._dbusservice['/Ac/L1/Energy/Reverse'] +
+        self._dbusservice['/Ac/L2/Energy/Reverse'] +
+        self._dbusservice['/Ac/L3/Energy/Reverse']
+      )
 
       #logging
       logging.debug("House Consumption (/Ac/Power): %s" % (self._dbusservice['/Ac/Power']))
