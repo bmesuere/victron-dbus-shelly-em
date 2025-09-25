@@ -1,31 +1,20 @@
 #!/usr/bin/env python
 # vim: ts=2 sw=2 et
 
-# import normal packages
 import platform
 import logging
-import logging.handlers
 import sys
 import os
-import sys
-
-if sys.version_info.major == 2:
-    import gobject
-else:
-    from gi.repository import GLib as gobject
-import sys
 import time
-import requests  # for http GET
-import configparser  # for config/ini file
+import requests  # HTTP GET
+import configparser  # INI config
+from gi.repository import GLib as gobject
 
-# our own packages from victron
-sys.path.insert(
-    1,
-    os.path.join(
-        os.path.dirname(__file__),
-        "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python",
-    ),
-)
+# Victron libs (velib_python)
+# Use absolute path;
+VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
+if VIC_TRON_PATH not in sys.path:
+    sys.path.insert(1, VIC_TRON_PATH)
 from vedbus import VeDbusService
 
 
@@ -42,8 +31,12 @@ class DbusShelly3emService:
         if role in allowed_roles:
             servicename = "com.victronenergy." + role
         else:
-            logging.error("Configured Role: %s is not in the allowed list")
-            exit()
+            logging.error(
+                "Configured Role '%s' is not in the allowed list %s",
+                role,
+                allowed_roles,
+            )
+            sys.exit(1)
 
         if role == "pvinverter":
             productid = 0xA144
