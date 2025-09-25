@@ -247,16 +247,7 @@ def main():
   logging.basicConfig(
     format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
-    level=getLogLevel(),
-    handlers=[
-      logging.FileHandler(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'current.log')),
-      logging.StreamHandler()
-    ]
-  ),
-                            handlers=[
-                                logging.FileHandler("%s/current.log" % (os.path.dirname(os.path.realpath(__file__)))),
-                                logging.StreamHandler()
-                            ])
+    level=getLogLevel()
  
   try:
       logging.info("Start")
