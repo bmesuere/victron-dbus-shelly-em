@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# vim: ts=2 sw=2 et
 
 import math
 import platform
@@ -35,9 +34,15 @@ REFRESH_INTERVAL_MS = 500
 
 class DbusShellyEmService:
     def __init__(
-        self, paths, productname="Shelly EM", connection="Shelly EM HTTP JSON service"
+        self,
+        device_cfg,
+        global_cfg,
+        paths,
+        productname="Shelly EM",
+        connection="Shelly EM HTTP JSON service",
     ):
-        self.global_cfg, self.device_cfg = self._load_new_config(CONFIG_PATH)
+        self.global_cfg = global_cfg
+        self.device_cfg = device_cfg
 
         deviceinstance = int(self.device_cfg.get("DeviceInstance", "40"))
         customname = self.device_cfg.get("CustomName", "Shelly EM")
@@ -97,9 +102,7 @@ class DbusShellyEmService:
         self._dbusservice.add_path("/HardwareVersion", 0)
         self._dbusservice.add_path("/Connected", 1)
         self._dbusservice.add_path("/Role", role)
-        self._dbusservice.add_path(
-            "/Position", self._getShellyPosition()
-        )  # normally only needed for pvinverter
+        self._dbusservice.add_path("/Position", self._getShellyPosition())
         self._dbusservice.add_path("/Serial", self._getShellySerial())
         self._dbusservice.add_path("/UpdateIndex", 0)
 
@@ -113,32 +116,14 @@ class DbusShellyEmService:
                 onchangecallback=self._handlechangedvalue,
             )
 
-        # last update
         self._lastUpdate = 0
-
-        # add _update function 'timer'
+        # Set up the main loop
         gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
-
-        # add _signOfLife 'timer' to get feedback in log every N minutes
         gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
 
     # ----------------------
-    # Config helpers (new only)
+    # Config helpers
     # ----------------------
-    def _load_new_config(self, path):
-        cp = configparser.ConfigParser()
-        cp.read(path)
-        if not cp.has_section("global"):
-            logging.critical("Missing [global] section in config")
-            sys.exit(1)
-        device_sections = [s for s in cp.sections() if s.lower().startswith("device:")]
-        if not device_sections:
-            logging.critical("At least one [device:*] section is required")
-            sys.exit(1)
-        # For now, keep single-device runtime: pick the first device section.
-        device = cp[device_sections[0]]
-        return cp["global"], device
-
     def _getSignOfLifeInterval(self):
         value = self.global_cfg.get("SignOfLifeLog", "0").strip()
         return int(value or 0)
@@ -211,13 +196,10 @@ class DbusShellyEmService:
         return meter_data
 
     def _getShellySerial(self):
-        meter_data = self._getShellyData()  # request/parse Shelly status
-
+        meter_data = self._getShellyData()
         if not meter_data.get("mac"):
             raise ValueError("Response does not contain 'mac' attribute")
-
-        serial = meter_data["mac"]
-        return serial
+        return meter_data["mac"]
 
     def _signOfLife(self):
         logging.info("--- Start: sign of life ---")
@@ -236,10 +218,7 @@ class DbusShellyEmService:
 
     def _update(self):
         try:
-            # Fetch data from Shelly EM
             meter_data = self._getShellyData()
-
-            # Select configured EM channel (0 or 1) and use it as L1
             ch = self.channel_idx
             em_list = meter_data.get("emeters", [])
             if not isinstance(em_list, list) or len(em_list) <= ch:
@@ -318,7 +297,36 @@ class DbusShellyEmService:
         return True  # accept the change
 
 
+def load_config(path):
+    cp = configparser.ConfigParser()
+    cp.read(path)
+    if not cp.has_section("global"):
+        logging.critical("Missing [global] section in config")
+        sys.exit(1)
+    device_sections = [s for s in cp.sections() if s.lower().startswith("device:")]
+    if not device_sections:
+        logging.critical("At least one [device:*] section is required")
+        sys.exit(1)
+    devices = [(name, cp[name]) for name in device_sections]
+    return cp["global"], devices
+
+
 def getLogLevel():
+    cp = configparser.ConfigParser()
+    cp.read(CONFIG_PATH)
+    if cp.has_section("global"):
+        level_str = cp["global"].get("LogLevel", "INFO")
+    else:
+        level_str = "INFO"
+
+    try:
+        level = logging.getLevelName(level_str)
+        if isinstance(level, str):
+            return logging.INFO
+        return level
+    except Exception:
+        return logging.INFO
+
     cp = configparser.ConfigParser()
     cp.read(CONFIG_PATH)
     if cp.has_section("global"):
@@ -337,7 +345,6 @@ def getLogLevel():
 
 
 def main():
-    # configure logging
     logging.basicConfig(
         format="%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -353,36 +360,55 @@ def main():
 
         from dbus.mainloop.glib import DBusGMainLoop
 
-        # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
         DBusGMainLoop(set_as_default=True)
 
-        # formatting
         _kwh = lambda p, v: (str(round(v, 2)) + " kWh")
         _a = lambda p, v: (str(round(v, 1)) + " A")
         _w = lambda p, v: (str(round(v, 1)) + " W")
         _v = lambda p, v: (str(round(v, 1)) + " V")
 
-        # start our main-service (still single-device for now)
-        pvac_output = DbusShellyEmService(
-            paths={
-                "/Ac/Energy/Forward": {
-                    "initial": 0,
-                    "textformat": _kwh,
-                },  # energy bought from the grid
-                "/Ac/Energy/Reverse": {
-                    "initial": 0,
-                    "textformat": _kwh,
-                },  # energy sold to the grid
-                "/Ac/Power": {"initial": 0, "textformat": _w},
-                "/Ac/Current": {"initial": 0, "textformat": _a},
-                "/Ac/Voltage": {"initial": 0, "textformat": _v},
-                "/Ac/L1/Voltage": {"initial": 0, "textformat": _v},
-                "/Ac/L1/Current": {"initial": 0, "textformat": _a},
-                "/Ac/L1/Power": {"initial": 0, "textformat": _w},
-            }
-        )
+        global_cfg, devices = load_config(CONFIG_PATH)
 
-        logging.info("Connected to dbus; entering gobject.MainLoop() (event-based)")
+        # Validate unique DeviceInstance values
+        seen_instances = set()
+        for name, d in devices:
+            inst = int(d.get("DeviceInstance", "0"))
+            if inst in seen_instances:
+                logging.critical(
+                    "Duplicate DeviceInstance %d across sections; ensure uniqueness.",
+                    inst,
+                )
+                sys.exit(1)
+            seen_instances.add(inst)
+
+        # Keep references so services don't get GC'd
+        services = []
+        for name, d in devices:
+            role = d.get("Role", "grid").strip().lower()
+            logging.info(
+                "Starting device '%s' (role=%s, instance=%s, host=%s)",
+                name,
+                role,
+                d.get("DeviceInstance"),
+                d.get("Host"),
+            )
+            svc = DbusShellyEmService(
+                device_cfg=d,
+                global_cfg=global_cfg,
+                paths={
+                    "/Ac/Energy/Forward": {"initial": 0, "textformat": _kwh},
+                    "/Ac/Energy/Reverse": {"initial": 0, "textformat": _kwh},
+                    "/Ac/Power": {"initial": 0, "textformat": _w},
+                    "/Ac/Current": {"initial": 0, "textformat": _a},
+                    "/Ac/Voltage": {"initial": 0, "textformat": _v},
+                    "/Ac/L1/Voltage": {"initial": 0, "textformat": _v},
+                    "/Ac/L1/Current": {"initial": 0, "textformat": _a},
+                    "/Ac/L1/Power": {"initial": 0, "textformat": _w},
+                },
+            )
+            services.append(svc)
+
+        logging.info("Connected to dbus; entering gobject.MainLoop()")
         mainloop = gobject.MainLoop()
         mainloop.run()
     except (
