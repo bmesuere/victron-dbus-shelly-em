@@ -1,31 +1,33 @@
 #!/usr/bin/env python
 # vim: ts=2 sw=2 et
 
-# import normal packages
 import platform
 import logging
-import logging.handlers
 import sys
 import os
-import sys
-
-if sys.version_info.major == 2:
-    import gobject
-else:
-    from gi.repository import GLib as gobject
-import sys
 import time
-import requests  # for http GET
-import configparser  # for config/ini file
+import requests  # HTTP GET
+import configparser  # INI config
+from gi.repository import GLib as gobject
 
-# our own packages from victron
-sys.path.insert(
-    1,
-    os.path.join(
-        os.path.dirname(__file__),
-        "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python",
-    ),
-)
+# Paths & constants
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
+LOG_FILE = os.path.join(BASE_DIR, "current.log")
+
+# Victron / product constants
+PRODUCT_ID_PVINVERTER = 0xA144
+PRODUCT_ID_GRID = 45069
+DEVICE_TYPE_ET340 = 345
+
+# Networking
+REQUEST_TIMEOUT_SECONDS = 5
+
+# Victron libs (velib_python)
+# Use absolute path;
+VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
+if VIC_TRON_PATH not in sys.path:
+    sys.path.insert(1, VIC_TRON_PATH)
 from vedbus import VeDbusService
 
 
@@ -33,22 +35,37 @@ class DbusShelly3emService:
     def __init__(
         self, paths, productname="Shelly 3EM", connection="Shelly 3EM HTTP JSON service"
     ):
-        config = self._getConfig()
-        deviceinstance = int(config["DEFAULT"]["DeviceInstance"])
-        customname = config["DEFAULT"]["CustomName"]
-        role = config["DEFAULT"]["Role"]
+        self.config = self._getConfig()
+        deviceinstance = int(self.config["DEFAULT"]["DeviceInstance"])
+        customname = self.config["DEFAULT"]["CustomName"]
+        role = self.config["DEFAULT"]["Role"]
 
         allowed_roles = ["pvinverter", "grid"]
         if role in allowed_roles:
             servicename = "com.victronenergy." + role
         else:
-            logging.error("Configured Role: %s is not in the allowed list")
-            exit()
+            logging.error(
+                "Configured Role '%s' is not in the allowed list %s",
+                role,
+                allowed_roles,
+            )
+            sys.exit(1)
 
         if role == "pvinverter":
-            productid = 0xA144
+            productid = PRODUCT_ID_PVINVERTER
         else:
-            productid = 45069
+            productid = PRODUCT_ID_GRID
+
+        # Reuse one HTTP session for all requests
+        self.session = requests.Session()
+        self._request_timeout = REQUEST_TIMEOUT_SECONDS
+
+        # Shelly connection settings derived once
+        host = self.config["ONPREMISE"]["Host"].strip()
+        self.shelly_base = "http://%s" % host
+        username = self.config["ONPREMISE"].get("Username", "").strip()
+        password = self.config["ONPREMISE"].get("Password", "")
+        self.auth = (username, password) if username else None
 
         self._dbusservice = VeDbusService(
             "{}.http_{:02d}".format(servicename, deviceinstance)
@@ -61,7 +78,7 @@ class DbusShelly3emService:
         self._dbusservice.add_path("/Mgmt/ProcessName", __file__)
         self._dbusservice.add_path(
             "/Mgmt/ProcessVersion",
-            "Unkown version, and running on Python " + platform.python_version(),
+            "Unknown version, and running on Python " + platform.python_version(),
         )
         self._dbusservice.add_path("/Mgmt/Connection", connection)
 
@@ -69,8 +86,8 @@ class DbusShelly3emService:
         self._dbusservice.add_path("/DeviceInstance", deviceinstance)
         self._dbusservice.add_path("/ProductId", productid)
         self._dbusservice.add_path(
-            "/DeviceType", 345
-        )  # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Engerie Meter
+            "/DeviceType", DEVICE_TYPE_ET340
+        )  # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Energy Meter
         self._dbusservice.add_path("/ProductName", productname)
         self._dbusservice.add_path("/CustomName", customname)
         self._dbusservice.add_path("/Latency", None)
@@ -80,7 +97,7 @@ class DbusShelly3emService:
         self._dbusservice.add_path("/Role", role)
         self._dbusservice.add_path(
             "/Position", self._getShellyPosition()
-        )  # normaly only needed for pvinverter
+        )  # normally only needed for pvinverter
         self._dbusservice.add_path("/Serial", self._getShellySerial())
         self._dbusservice.add_path("/UpdateIndex", 0)
 
@@ -104,7 +121,7 @@ class DbusShelly3emService:
         gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
 
     def _getShellySerial(self):
-        meter_data = self._getShellyData()
+        meter_data = self._getShellyData()  # request/parse Shelly status
 
         if not meter_data["mac"]:
             raise ValueError("Response does not contain 'mac' attribute")
@@ -114,58 +131,45 @@ class DbusShelly3emService:
 
     def _getConfig(self):
         config = configparser.ConfigParser()
-        config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
+        config.read(CONFIG_PATH)
         return config
 
     def _getSignOfLifeInterval(self):
-        config = self._getConfig()
-        value = config["DEFAULT"]["SignOfLifeLog"]
-
-        if not value:
-            value = 0
-
-        return int(value)
+        value = self.config["DEFAULT"].get("SignOfLifeLog", "0").strip()
+        return int(value or 0)
 
     def _getShellyPosition(self):
-        config = self._getConfig()
-        value = config["DEFAULT"]["Position"]
-
-        if not value:
-            value = 0
-
-        return int(value)
-
-    def _getShellyStatusUrl(self):
-        config = self._getConfig()
-        accessType = config["DEFAULT"]["AccessType"]
-
-        if accessType == "OnPremise":
-            URL = "http://%s:%s@%s/status" % (
-                config["ONPREMISE"]["Username"],
-                config["ONPREMISE"]["Password"],
-                config["ONPREMISE"]["Host"],
-            )
-            URL = URL.replace(":@", "")
-        else:
-            raise ValueError(
-                "AccessType %s is not supported" % (config["DEFAULT"]["AccessType"])
-            )
-
-        return URL
+        value = self.config["DEFAULT"].get("Position", "0").strip()
+        return int(value or 0)
 
     def _getShellyData(self):
-        URL = self._getShellyStatusUrl()
-        meter_r = requests.get(url=URL, timeout=5)
+        URL = self.shelly_base + "/status"
 
-        # check for response
-        if not meter_r:
-            raise ConnectionError("No response from Shelly 3EM - %s" % (URL))
+        r = self.session.get(
+            url=URL,
+            timeout=self._request_timeout,
+            auth=self.auth,
+            headers={"Accept": "application/json"},
+        )
+        # Raise for HTTP errors (4xx/5xx)
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as e:
+            logging.critical(
+                "HTTP error from Shelly at %s/status: %s",
+                self.shelly_base,
+                e,
+                exc_info=e,
+            )
+            raise
 
-        meter_data = meter_r.json()
+        try:
+            meter_data = r.json()
+        except ValueError as e:
+            raise ValueError("Invalid JSON from Shelly at %s: %s" % (URL, e))
 
-        # check for Json
-        if not meter_data:
-            raise ValueError("Converting response to JSON failed")
+        if not isinstance(meter_data, dict):
+            raise ValueError("Unexpected JSON structure from Shelly at %s" % (URL))
 
         return meter_data
 
@@ -180,10 +184,9 @@ class DbusShelly3emService:
         try:
             # get data from Shelly 3em
             meter_data = self._getShellyData()
-            config = self._getConfig()
 
             try:
-                remapL1 = int(config["ONPREMISE"]["L1Position"])
+                remapL1 = int(self.config["ONPREMISE"]["L1Position"])
             except KeyError:
                 remapL1 = 1
 
@@ -246,7 +249,7 @@ class DbusShelly3emService:
                 % (self._dbusservice["/Ac/Energy/Forward"])
             )
             logging.debug(
-                "House Reverse (/Ac/Energy/Revers): %s"
+                "House Reverse (/Ac/Energy/Reverse): %s"
                 % (self._dbusservice["/Ac/Energy/Reverse"])
             )
             logging.debug("---")
@@ -265,7 +268,8 @@ class DbusShelly3emService:
             ConnectionError,
         ) as e:
             logging.critical(
-                "Error getting data from Shelly - check network or Shelly status. Setting power values to 0. Details: %s",
+                "Error getting data from Shelly at %s - check network or device status. Setting power values to 0. Details: %s",
+                self.shelly_base,
                 e,
                 exc_info=e,
             )
@@ -289,7 +293,7 @@ class DbusShelly3emService:
 
 def getLogLevel():
     config = configparser.ConfigParser()
-    config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
+    config.read(CONFIG_PATH)
     logLevelString = config["DEFAULT"]["LogLevel"]
 
     if logLevelString:
@@ -307,9 +311,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
         level=getLogLevel(),
         handlers=[
-            logging.FileHandler(
-                "%s/current.log" % (os.path.dirname(os.path.realpath(__file__)))
-            ),
+            logging.FileHandler(LOG_FILE),
             logging.StreamHandler(),
         ],
     )
