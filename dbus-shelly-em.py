@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # vim: ts=2 sw=2 et
 
+import math
 import platform
 import logging
 import sys
@@ -9,6 +10,13 @@ import time
 import requests  # HTTP GET
 import configparser  # INI config
 from gi.repository import GLib as gobject
+
+# Victron libs (velib_python)
+# Use absolute path;
+VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
+if VIC_TRON_PATH not in sys.path:
+    sys.path.insert(1, VIC_TRON_PATH)
+from vedbus import VeDbusService
 
 # Paths & constants
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -23,13 +31,6 @@ DEVICE_TYPE_ET340 = 345
 # Networking
 REQUEST_TIMEOUT_SECONDS = 5
 REFRESH_INTERVAL_SECONDS = 0.5
-
-# Victron libs (velib_python)
-# Use absolute path;
-VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
-if VIC_TRON_PATH not in sys.path:
-    sys.path.insert(1, VIC_TRON_PATH)
-from vedbus import VeDbusService
 
 
 class DbusShellyEmService:
@@ -71,9 +72,7 @@ class DbusShellyEmService:
         # Read selected channel (0 or 1) for Shelly EM
         self.channel_idx = self._getSelectedChannel()
 
-        self._dbusservice = VeDbusService(
-            "f"{servicename}.http_{deviceinstance:02d}"
-        )
+        self._dbusservice = VeDbusService(f"{servicename}.http_{deviceinstance:02d}")
         self._paths = paths
 
         logging.debug(f"{servicename} /DeviceInstance = {deviceinstance}")
@@ -89,9 +88,7 @@ class DbusShellyEmService:
         # Create the mandatory objects
         self._dbusservice.add_path("/DeviceInstance", deviceinstance)
         self._dbusservice.add_path("/ProductId", productid)
-        self._dbusservice.add_path(
-            "/DeviceType", DEVICE_TYPE_ET340
-        )  # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Energy Meter
+        self._dbusservice.add_path("/DeviceType", DEVICE_TYPE_ET340)
         self._dbusservice.add_path("/ProductName", productname)
         self._dbusservice.add_path("/CustomName", customname)
         self._dbusservice.add_path("/Latency", None)
@@ -157,6 +154,24 @@ class DbusShellyEmService:
             channel = 0
         return channel
 
+    def _calc_current(self, power: float, reactive: float, voltage: float) -> float:
+        """Compute RMS current from active power (W), reactive power (var) and voltage (V).
+        Uses S = sqrt(P^2 + Q^2) to avoid division by pf≈0; I = S / V.
+        Returns 0.0 if voltage ≤ 0 or inputs are not finite.
+        """
+        try:
+            p = float(power or 0.0)
+            q = float(reactive or 0.0)
+            v = float(voltage or 0.0)
+        except Exception:
+            return 0.0
+        if not math.isfinite(p) or not math.isfinite(q) or not math.isfinite(v):
+            return 0.0
+        if v <= 0.0:
+            return 0.0
+        S = math.hypot(p, q)  # sqrt(p*p + q*q)
+        return S / v
+
     def _getShellyData(self):
         URL = self.shelly_base + "/status"
 
@@ -192,12 +207,20 @@ class DbusShellyEmService:
         logging.info("--- Start: sign of life ---")
         logging.info(f"Last _update() call: {self._lastUpdate}")
         logging.info(f"Last '/Ac/Power': {self._dbusservice['/Ac/Power']}")
+        logging.info(f"Last '/Ac/Voltage': {self._dbusservice['/Ac/Voltage']}")
+        logging.info(f"Last '/Ac/Current': {self._dbusservice['/Ac/Current']}")
+        logging.info(
+            f"Last '/Ac/Energy/Forward': {self._dbusservice['/Ac/Energy/Forward']}"
+        )
+        logging.info(
+            f"Last '/Ac/Energy/Reverse': {self._dbusservice['/Ac/Energy/Reverse']}"
+        )
         logging.info("--- End: sign of life ---")
         return True
 
     def _update(self):
         try:
-            # fetch data from Shelly EM
+            # Fetch data from Shelly EM
             meter_data = self._getShellyData()
 
             # Select configured EM channel (0 or 1) and use it as L1
@@ -207,48 +230,49 @@ class DbusShellyEmService:
                 raise ValueError(f"Shelly status has no emeters[{ch}]")
             em = em_list[ch]
 
-            # send data to DBus
-            self._dbusservice["/Ac/Power"] = float(em.get("power", 0) or 0)
-            self._dbusservice["/Ac/Voltage"] = float(em.get("voltage", 0) or 0)
-            self._dbusservice["/Ac/Current"] = float(em.get("current", 0) or 0)
+            # Bail out if Shelly marks this sample invalid
+            if not bool(em.get("is_valid", True)):
+                logging.warning(
+                    "Shelly channel %d reports is_valid=false; skipping update", ch
+                )
+                return True
 
-            self._dbusservice["/Ac/L1/Voltage"] = float(em.get("voltage", 0) or 0)
-            self._dbusservice["/Ac/L1/Current"] = float(em.get("current", 0) or 0)
-            self._dbusservice["/Ac/L1/Power"] = float(em.get("power", 0) or 0)
+            p = float(em.get("power", 0) or 0)
+            v = float(em.get("voltage", 0) or 0)
+            q = float(em.get("reactive", 0) or 0)
 
-            # Old version
-            # self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/L1/Energy/Forward'] + self._dbusservice['/Ac/L2/Energy/Forward'] + self._dbusservice['/Ac/L3/Energy/Forward']
-            # self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/L1/Energy/Reverse'] + self._dbusservice['/Ac/L2/Energy/Reverse'] + self._dbusservice['/Ac/L3/Energy/Reverse']
+            # Shelly doesn't report current, so we calculate it
+            i = self._calc_current(p, q, v)
 
-            # New Version - from xris99
-            # Increment kWh by integrating Watts over REFRESH_INTERVAL_SECONDS
-            if self._dbusservice["/Ac/Power"] > 0:
-                self._dbusservice["/Ac/Energy/Forward"] = self._dbusservice[
-                    "/Ac/Energy/Forward"
-                ] + (self._dbusservice["/Ac/Power"] * REFRESH_INTERVAL_SECONDS / 3600000)
-            if self._dbusservice["/Ac/Power"] < 0:
-                self._dbusservice["/Ac/Energy/Reverse"] = self._dbusservice[
-                    "/Ac/Energy/Reverse"
-                ] + (self._dbusservice["/Ac/Power"] * -1 * REFRESH_INTERVAL_SECONDS / 3600000)
+            total_kwh = float(em.get("total", 0) or 0) / 1000.0
+            total_returned_kwh = float(em.get("total_returned", 0) or 0) / 1000.0
 
-            # logging
-            logging.debug(
-                f"House Consumption (/Ac/Power): {self._dbusservice['/Ac/Power']}"
-            )
-            logging.debug(
-                f"House Forward (/Ac/Energy/Forward): {self._dbusservice['/Ac/Energy/Forward']}"
-            )
-            logging.debug(
-                f"House Reverse (/Ac/Energy/Reverse): {self._dbusservice['/Ac/Energy/Reverse']}"
-            )
-            logging.debug("---")
+            # Send data to DBus
+            self._dbusservice["/Ac/Power"] = p
+            self._dbusservice["/Ac/Voltage"] = v
+            self._dbusservice["/Ac/Current"] = i
 
-            # increment UpdateIndex - to show that new data is available an wrap
+            self._dbusservice["/Ac/L1/Power"] = p
+            self._dbusservice["/Ac/L1/Voltage"] = v
+            self._dbusservice["/Ac/L1/Current"] = i
+
+            self._dbusservice["/Ac/Energy/Forward"] = total_kwh
+            self._dbusservice["/Ac/Energy/Reverse"] = total_returned_kwh
+
+            # Increment UpdateIndex - to show that new data is available, wraps at 256
             self._dbusservice["/UpdateIndex"] = (
                 self._dbusservice["/UpdateIndex"] + 1
             ) % 256
 
-            # update lastupdate vars
+            logging.debug(
+                "Consumption (/Ac/Power): %s\nVoltage (/Ac/Voltage): %s\nCurrent (/Ac/Current): %s\nForward (/Ac/Energy/Forward): %s\nReverse (/Ac/Energy/Reverse): %s\n---",
+                p,
+                v,
+                i,
+                total_kwh,
+                total_returned_kwh,
+            )
+
             self._lastUpdate = time.time()
         except (
             ValueError,
@@ -335,7 +359,8 @@ def main():
                 "/Ac/Voltage": {"initial": 0, "textformat": _v},
                 "/Ac/L1/Voltage": {"initial": 0, "textformat": _v},
                 "/Ac/L1/Current": {"initial": 0, "textformat": _a},
-                "/Ac/L1/Power": {"initial": 0, "textformat": _w},            }
+                "/Ac/L1/Power": {"initial": 0, "textformat": _w},
+            }
         )
 
         logging.info("Connected to dbus; entering gobject.MainLoop() (event-based)")
