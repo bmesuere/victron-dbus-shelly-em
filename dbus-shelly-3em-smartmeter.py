@@ -10,6 +10,19 @@ import requests  # HTTP GET
 import configparser  # INI config
 from gi.repository import GLib as gobject
 
+# Paths & constants
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
+LOG_FILE = os.path.join(BASE_DIR, "current.log")
+
+# Victron / product constants
+PRODUCT_ID_PVINVERTER = 0xA144
+PRODUCT_ID_GRID = 45069
+DEVICE_TYPE_ET340 = 345
+
+# Networking
+REQUEST_TIMEOUT_SECONDS = 5
+
 # Victron libs (velib_python)
 # Use absolute path;
 VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
@@ -39,13 +52,13 @@ class DbusShelly3emService:
             sys.exit(1)
 
         if role == "pvinverter":
-            productid = 0xA144
+            productid = PRODUCT_ID_PVINVERTER
         else:
-            productid = 45069
+            productid = PRODUCT_ID_GRID
 
         # Reuse one HTTP session for all requests
         self.session = requests.Session()
-        self._request_timeout = 5
+        self._request_timeout = REQUEST_TIMEOUT_SECONDS
 
         # Shelly connection settings derived once
         host = self.config["ONPREMISE"]["Host"].strip()
@@ -73,7 +86,7 @@ class DbusShelly3emService:
         self._dbusservice.add_path("/DeviceInstance", deviceinstance)
         self._dbusservice.add_path("/ProductId", productid)
         self._dbusservice.add_path(
-            "/DeviceType", 345
+            "/DeviceType", DEVICE_TYPE_ET340
         )  # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Energy Meter
         self._dbusservice.add_path("/ProductName", productname)
         self._dbusservice.add_path("/CustomName", customname)
@@ -118,7 +131,7 @@ class DbusShelly3emService:
 
     def _getConfig(self):
         config = configparser.ConfigParser()
-        config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
+        config.read(CONFIG_PATH)
         return config
 
     def _getSignOfLifeInterval(self):
@@ -280,7 +293,7 @@ class DbusShelly3emService:
 
 def getLogLevel():
     config = configparser.ConfigParser()
-    config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
+    config.read(CONFIG_PATH)
     logLevelString = config["DEFAULT"]["LogLevel"]
 
     if logLevelString:
@@ -298,9 +311,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
         level=getLogLevel(),
         handlers=[
-            logging.FileHandler(
-                "%s/current.log" % (os.path.dirname(os.path.realpath(__file__)))
-            ),
+            logging.FileHandler(LOG_FILE),
             logging.StreamHandler(),
         ],
     )
