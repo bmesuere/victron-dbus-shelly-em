@@ -6,9 +6,11 @@ import logging
 import sys
 import os
 import time
+from datetime import datetime
 import requests  # HTTP GET
 import configparser  # INI config
 from gi.repository import GLib as gobject
+from multiprocessing import Process
 
 # Victron libs (velib_python)
 # Use absolute path;
@@ -73,6 +75,7 @@ class DbusShellyEmService:
 
         # Reuse one HTTP session for all requests
         self.session = requests.Session()
+        # timeouts are a (connect, read) tuple; see _getShellyData
         self._request_timeout = REQUEST_TIMEOUT_SECONDS
 
         # Shelly connection settings derived once
@@ -130,8 +133,11 @@ class DbusShellyEmService:
             )
 
         self._lastUpdate = 0
-        # Set up the main loop
-        gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
+        # Set up the main loop with a staggered start to avoid hammering the same Shelly when multiple devices share a host
+        jitter_ms = (
+            (deviceinstance * 53 + self.channel_idx * 17) % REFRESH_INTERVAL_MS
+        ) or 50
+        gobject.timeout_add(jitter_ms, self._start_periodic)
         gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
 
     # ----------------------
@@ -180,13 +186,20 @@ class DbusShellyEmService:
     def _getShellyData(self):
         URL = self.shelly_base + "/status"
 
-        r = self.session.get(
-            url=URL,
-            timeout=self._request_timeout,
-            auth=self.auth,
-            headers={"Accept": "application/json"},
-        )
-        # Raise for HTTP errors (4xx/5xx)
+        def _do_get():
+            return self.session.get(
+                url=URL,
+                timeout=self._request_timeout,
+                auth=self.auth,
+                headers={"Accept": "application/json"},
+            )
+
+        try:
+            r = _do_get()
+        except requests.exceptions.ReadTimeout:
+            # one quick retry on read timeout
+            r = _do_get()
+
         try:
             r.raise_for_status()
         except requests.HTTPError as e:
@@ -211,9 +224,23 @@ class DbusShellyEmService:
             raise ValueError("Response does not contain 'mac' attribute")
         return meter_data["mac"]
 
+    def _start_periodic(self):
+        # Register the periodic updater after an initial jitter delay
+        gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
+        return False  # one-shot
+
     def _signOfLife(self):
-        self.log.info("--- Start: sign of life ---")
-        self.log.info(f"Last _update() call: {self._lastUpdate}")
+        # Pretty-print last update timestamp with local time and age
+        if self._lastUpdate:
+            dt = datetime.fromtimestamp(self._lastUpdate)
+            age = time.time() - self._lastUpdate
+            self.log.info("--- Start: sign of life ---")
+            self.log.info(
+                f"Last _update() call: {dt:%Y-%m-%d %H:%M:%S} ({int(age)}s ago)"
+            )
+        else:
+            self.log.info("--- Start: sign of life ---")
+            self.log.info("Last _update() call: never")
         self.log.info(f"Last '/Ac/Power': {self._dbusservice['/Ac/Power']}")
         self.log.info(f"Last '/Ac/Voltage': {self._dbusservice['/Ac/Voltage']}")
         self.log.info(f"Last '/Ac/Current': {self._dbusservice['/Ac/Current']}")
@@ -308,7 +335,7 @@ class DbusShellyEmService:
 
 
 def load_config(path):
-    cp = configparser.ConfigParser()
+    cp = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cp.read(path)
     if not cp.has_section("global"):
         logging.critical("Missing [global] section in config")
@@ -322,7 +349,7 @@ def load_config(path):
 
 
 def getLogLevel():
-    cp = configparser.ConfigParser()
+    cp = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cp.read(CONFIG_PATH)
     level_str = (
         cp["global"].get("LogLevel", "INFO") if cp.has_section("global") else "INFO"
@@ -334,6 +361,56 @@ def getLogLevel():
         return level
     except Exception:
         return logging.INFO
+
+
+def run_device(name, device_cfg, global_cfg):
+    """Spawned in a separate process to avoid D-Bus root object path ('/') conflicts.
+    Each process creates its own VeDbusService and GLib main loop.
+    """
+    logging.basicConfig(
+        format="%(asctime)s,%(msecs)d %(processName)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        level=getLogLevel(),
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(),
+        ],
+        force=True,
+    )
+
+    from dbus.mainloop.glib import DBusGMainLoop
+
+    DBusGMainLoop(set_as_default=True)
+
+    _kwh = lambda p, v: (str(round(v, 2)) + " kWh")
+    _a = lambda p, v: (str(round(v, 1)) + " A")
+    _w = lambda p, v: (str(round(v, 1)) + " W")
+    _v = lambda p, v: (str(round(v, 1)) + " V")
+
+    role = device_cfg.get("Role", "grid").strip().lower()
+    logging.info(
+        f"Starting device '{name}' (role={role}, instance={device_cfg.get('DeviceInstance')}, host={device_cfg.get('Host')})"
+    )
+
+    svc = DbusShellyEmService(
+        device_cfg=device_cfg,
+        global_cfg=global_cfg,
+        paths={
+            "/Ac/Energy/Forward": {"initial": 0, "textformat": _kwh},
+            "/Ac/Energy/Reverse": {"initial": 0, "textformat": _kwh},
+            "/Ac/Power": {"initial": 0, "textformat": _w},
+            "/Ac/Current": {"initial": 0, "textformat": _a},
+            "/Ac/Voltage": {"initial": 0, "textformat": _v},
+            "/Ac/L1/Voltage": {"initial": 0, "textformat": _v},
+            "/Ac/L1/Current": {"initial": 0, "textformat": _a},
+            "/Ac/L1/Power": {"initial": 0, "textformat": _w},
+        },
+        dev_name=name,
+    )
+
+    logging.info("Connected to dbus; entering gobject.MainLoop()")
+    mainloop = gobject.MainLoop()
+    mainloop.run()
 
 
 def main():
@@ -350,15 +427,6 @@ def main():
     try:
         logging.info("Start")
 
-        from dbus.mainloop.glib import DBusGMainLoop
-
-        DBusGMainLoop(set_as_default=True)
-
-        _kwh = lambda p, v: (str(round(v, 2)) + " kWh")
-        _a = lambda p, v: (str(round(v, 1)) + " A")
-        _w = lambda p, v: (str(round(v, 1)) + " W")
-        _v = lambda p, v: (str(round(v, 1)) + " V")
-
         global_cfg, devices = load_config(CONFIG_PATH)
 
         # Validate unique DeviceInstance values
@@ -373,33 +441,17 @@ def main():
                 sys.exit(1)
             seen_instances.add(inst)
 
-        # Keep references so services don't get GC'd
-        services = []
+        # Spawn one process per device to avoid D-Bus root object ('/') conflicts
+        procs = []
         for name, d in devices:
-            role = d.get("Role", "grid").strip().lower()
-            logging.info(
-                f"Starting device '{name}' (role={role}, instance={d.get('DeviceInstance')}, host={d.get('Host')})"
-            )
-            svc = DbusShellyEmService(
-                device_cfg=d,
-                global_cfg=global_cfg,
-                paths={
-                    "/Ac/Energy/Forward": {"initial": 0, "textformat": _kwh},
-                    "/Ac/Energy/Reverse": {"initial": 0, "textformat": _kwh},
-                    "/Ac/Power": {"initial": 0, "textformat": _w},
-                    "/Ac/Current": {"initial": 0, "textformat": _a},
-                    "/Ac/Voltage": {"initial": 0, "textformat": _v},
-                    "/Ac/L1/Voltage": {"initial": 0, "textformat": _v},
-                    "/Ac/L1/Current": {"initial": 0, "textformat": _a},
-                    "/Ac/L1/Power": {"initial": 0, "textformat": _w},
-                },
-                dev_name=name,
-            )
-            services.append(svc)
+            p = Process(target=run_device, args=(name, d, global_cfg), daemon=True)
+            p.start()
+            procs.append(p)
+            logging.info(f"Spawned process {p.name} (pid={p.pid}) for device '{name}'")
 
-        logging.info("Connected to dbus; entering gobject.MainLoop()")
-        mainloop = gobject.MainLoop()
-        mainloop.run()
+        for p in procs:
+            p.join()
+
     except (
         ValueError,
         requests.exceptions.ConnectionError,
