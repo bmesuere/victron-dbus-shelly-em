@@ -37,36 +37,37 @@ class DbusShellyEmService:
     def __init__(
         self, paths, productname="Shelly EM", connection="Shelly EM HTTP JSON service"
     ):
-        self.config = self._getConfig()
-        deviceinstance = int(self.config["DEFAULT"]["DeviceInstance"])  # required
-        customname = self.config["DEFAULT"].get("CustomName", "Shelly EM")
-        role = self.config["DEFAULT"].get("Role", "grid")
+        self.global_cfg, self.device_cfg = self._load_new_config(CONFIG_PATH)
+
+        deviceinstance = int(self.device_cfg.get("DeviceInstance", "40"))
+        customname = self.device_cfg.get("CustomName", "Shelly EM")
+        role = self.device_cfg.get("Role", "grid").strip().lower()
 
         allowed_roles = ["pvinverter", "grid"]
         if role in allowed_roles:
             servicename = f"com.victronenergy.{role}"
         else:
-            logging.error(
+            logging.critical(
                 "Configured Role '%s' is not in the allowed list %s",
                 role,
                 allowed_roles,
             )
             sys.exit(1)
 
-        if role == "pvinverter":
-            productid = PRODUCT_ID_PVINVERTER
-        else:
-            productid = PRODUCT_ID_GRID
+        productid = PRODUCT_ID_PVINVERTER if role == "pvinverter" else PRODUCT_ID_GRID
 
         # Reuse one HTTP session for all requests
         self.session = requests.Session()
         self._request_timeout = REQUEST_TIMEOUT_SECONDS
 
         # Shelly connection settings derived once
-        host = self.config["ONPREMISE"]["Host"].strip()
+        host = self.device_cfg.get("Host", "").strip()
+        if not host:
+            logging.critical("[device:*] section requires Host")
+            sys.exit(1)
         self.shelly_base = f"http://{host}"
-        username = self.config["ONPREMISE"].get("Username", "").strip()
-        password = self.config["ONPREMISE"].get("Password", "")
+        username = self.device_cfg.get("Username", "").strip()
+        password = self.device_cfg.get("Password", "")
         self.auth = (username, password) if username else None
 
         # Read selected channel (0 or 1) for Shelly EM
@@ -118,34 +119,37 @@ class DbusShellyEmService:
         # add _update function 'timer'
         gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
 
-        # add _signOfLife 'timer' to get feedback in log every 5minutes
+        # add _signOfLife 'timer' to get feedback in log every N minutes
         gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
 
-    def _getShellySerial(self):
-        meter_data = self._getShellyData()  # request/parse Shelly status
-
-        if not meter_data["mac"]:
-            raise ValueError("Response does not contain 'mac' attribute")
-
-        serial = meter_data["mac"]
-        return serial
-
-    def _getConfig(self):
-        config = configparser.ConfigParser()
-        config.read(CONFIG_PATH)
-        return config
+    # ----------------------
+    # Config helpers (new only)
+    # ----------------------
+    def _load_new_config(self, path):
+        cp = configparser.ConfigParser()
+        cp.read(path)
+        if not cp.has_section("global"):
+            logging.critical("Missing [global] section in config")
+            sys.exit(1)
+        device_sections = [s for s in cp.sections() if s.lower().startswith("device:")]
+        if not device_sections:
+            logging.critical("At least one [device:*] section is required")
+            sys.exit(1)
+        # For now, keep single-device runtime: pick the first device section.
+        device = cp[device_sections[0]]
+        return cp["global"], device
 
     def _getSignOfLifeInterval(self):
-        value = self.config["DEFAULT"].get("SignOfLifeLog", "0").strip()
+        value = self.global_cfg.get("SignOfLifeLog", "0").strip()
         return int(value or 0)
 
     def _getShellyPosition(self):
-        value = self.config["DEFAULT"].get("Position", "0").strip()
+        value = self.device_cfg.get("Position", "0").strip()
         return int(value or 0)
 
     def _getSelectedChannel(self):
         try:
-            value = self.config["ONPREMISE"].get("Channel", "0").strip()
+            value = self.device_cfg.get("Channel", "0").strip()
             channel = int(value or 0)
         except Exception:
             channel = 0
@@ -154,6 +158,9 @@ class DbusShellyEmService:
             channel = 0
         return channel
 
+    # ----------------------
+    # Shelly & DBus helpers
+    # ----------------------
     def _calc_current(self, power: float, reactive: float, voltage: float) -> float:
         """Compute RMS current from active power (W), reactive power (var) and voltage (V).
         Uses S = sqrt(P^2 + Q^2) to avoid division by pf≈0; I = S / V.
@@ -202,6 +209,15 @@ class DbusShellyEmService:
             raise ValueError(f"Unexpected JSON structure from Shelly at {URL}")
 
         return meter_data
+
+    def _getShellySerial(self):
+        meter_data = self._getShellyData()  # request/parse Shelly status
+
+        if not meter_data.get("mac"):
+            raise ValueError("Response does not contain 'mac' attribute")
+
+        serial = meter_data["mac"]
+        return serial
 
     def _signOfLife(self):
         logging.info("--- Start: sign of life ---")
@@ -303,16 +319,21 @@ class DbusShellyEmService:
 
 
 def getLogLevel():
-    config = configparser.ConfigParser()
-    config.read(CONFIG_PATH)
-    logLevelString = config["DEFAULT"]["LogLevel"]
-
-    if logLevelString:
-        level = logging.getLevelName(logLevelString)
+    cp = configparser.ConfigParser()
+    cp.read(CONFIG_PATH)
+    if cp.has_section("global"):
+        level_str = cp["global"].get("LogLevel", "INFO")
     else:
-        level = logging.INFO
+        level_str = "INFO"
 
-    return level
+    try:
+        level = logging.getLevelName(level_str)
+        # getLevelName returns the same string if not a valid level; guard it
+        if isinstance(level, str):
+            return logging.INFO
+        return level
+    except Exception:
+        return logging.INFO
 
 
 def main():
@@ -341,7 +362,7 @@ def main():
         _w = lambda p, v: (str(round(v, 1)) + " W")
         _v = lambda p, v: (str(round(v, 1)) + " V")
 
-        # start our main-service
+        # start our main-service (still single-device for now)
         pvac_output = DbusShellyEmService(
             paths={
                 "/Ac/Energy/Forward": {
