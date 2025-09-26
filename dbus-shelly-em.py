@@ -32,12 +32,24 @@ REQUEST_TIMEOUT_SECONDS = 5
 REFRESH_INTERVAL_MS = 500
 
 
+class DeviceAdapter(logging.LoggerAdapter):
+    """Prefixes all log messages with a compact device tag.
+
+    Example: "[grid:40@192.168.0.62]" or "[pv:41@192.168.0.63]".
+    """
+
+    def process(self, msg, kwargs):
+        prefix = self.extra.get("prefix", "device")
+        return f"[{prefix}] {msg}", kwargs
+
+
 class DbusShellyEmService:
     def __init__(
         self,
         device_cfg,
         global_cfg,
         paths,
+        dev_name: str,
         productname="Shelly EM",
         connection="Shelly EM HTTP JSON service",
     ):
@@ -52,10 +64,8 @@ class DbusShellyEmService:
         if role in allowed_roles:
             servicename = f"com.victronenergy.{role}"
         else:
-            logging.critical(
-                "Configured Role '%s' is not in the allowed list %s",
-                role,
-                allowed_roles,
+            self.log.critical(
+                f"Configured Role '{role}' is not in the allowed list {allowed_roles}"
             )
             sys.exit(1)
 
@@ -67,8 +77,11 @@ class DbusShellyEmService:
 
         # Shelly connection settings derived once
         host = self.device_cfg.get("Host", "").strip()
+        # Device-scoped logger with a readable prefix (dev name, role, instance, host)
+        tag = f"{dev_name}:{role}:{deviceinstance}@{host or '-'}"
+        self.log = DeviceAdapter(logging.getLogger(__name__), {"prefix": tag})
         if not host:
-            logging.critical("[device:*] section requires Host")
+            self.log.critical("[device:*] section requires Host")
             sys.exit(1)
         self.shelly_base = f"http://{host}"
         username = self.device_cfg.get("Username", "").strip()
@@ -81,7 +94,7 @@ class DbusShellyEmService:
         self._dbusservice = VeDbusService(f"{servicename}.http_{deviceinstance:02d}")
         self._paths = paths
 
-        logging.debug(f"{servicename} /DeviceInstance = {deviceinstance}")
+        self.log.debug(f"{servicename} /DeviceInstance = {deviceinstance}")
 
         # Create the management objects, as specified in the ccgx dbus-api document
         self._dbusservice.add_path("/Mgmt/ProcessName", __file__)
@@ -139,7 +152,7 @@ class DbusShellyEmService:
         except Exception:
             channel = 0
         if channel not in (0, 1):
-            logging.warning("Invalid Channel '%s' in config; defaulting to 0", value)
+            self.log.warning(f"Invalid Channel '{value}' in config; defaulting to 0")
             channel = 0
         return channel
 
@@ -177,11 +190,8 @@ class DbusShellyEmService:
         try:
             r.raise_for_status()
         except requests.HTTPError as e:
-            logging.critical(
-                "HTTP error from Shelly at %s/status: %s",
-                self.shelly_base,
-                e,
-                exc_info=e,
+            self.log.critical(
+                f"HTTP error from Shelly at {self.shelly_base}/status: {e}", exc_info=e
             )
             raise
 
@@ -202,18 +212,18 @@ class DbusShellyEmService:
         return meter_data["mac"]
 
     def _signOfLife(self):
-        logging.info("--- Start: sign of life ---")
-        logging.info(f"Last _update() call: {self._lastUpdate}")
-        logging.info(f"Last '/Ac/Power': {self._dbusservice['/Ac/Power']}")
-        logging.info(f"Last '/Ac/Voltage': {self._dbusservice['/Ac/Voltage']}")
-        logging.info(f"Last '/Ac/Current': {self._dbusservice['/Ac/Current']}")
-        logging.info(
+        self.log.info("--- Start: sign of life ---")
+        self.log.info(f"Last _update() call: {self._lastUpdate}")
+        self.log.info(f"Last '/Ac/Power': {self._dbusservice['/Ac/Power']}")
+        self.log.info(f"Last '/Ac/Voltage': {self._dbusservice['/Ac/Voltage']}")
+        self.log.info(f"Last '/Ac/Current': {self._dbusservice['/Ac/Current']}")
+        self.log.info(
             f"Last '/Ac/Energy/Forward': {self._dbusservice['/Ac/Energy/Forward']}"
         )
-        logging.info(
+        self.log.info(
             f"Last '/Ac/Energy/Reverse': {self._dbusservice['/Ac/Energy/Reverse']}"
         )
-        logging.info("--- End: sign of life ---")
+        self.log.info("--- End: sign of life ---")
         return True
 
     def _update(self):
@@ -227,8 +237,8 @@ class DbusShellyEmService:
 
             # Bail out if Shelly marks this sample invalid
             if not bool(em.get("is_valid", True)):
-                logging.warning(
-                    "Shelly channel %d reports is_valid=false; skipping update", ch
+                self.log.warning(
+                    f"Shelly channel {ch} reports is_valid=false; skipping update"
                 )
                 return True
 
@@ -259,12 +269,12 @@ class DbusShellyEmService:
                 self._dbusservice["/UpdateIndex"] + 1
             ) % 256
 
-            logging.debug(f"Consumption (/Ac/Power): {p}")
-            logging.debug(f"Voltage (/Ac/Voltage): {v}")
-            logging.debug(f"Current (/Ac/Current): {i}")
-            logging.debug(f"Forward (/Ac/Energy/Forward): {total_kwh}")
-            logging.debug(f"Reverse (/Ac/Energy/Reverse): {total_returned_kwh}")
-            logging.debug("---")
+            self.log.debug(f"Consumption (/Ac/Power): {p}")
+            self.log.debug(f"Voltage (/Ac/Voltage): {v}")
+            self.log.debug(f"Current (/Ac/Current): {i}")
+            self.log.debug(f"Forward (/Ac/Energy/Forward): {total_kwh}")
+            self.log.debug(f"Reverse (/Ac/Energy/Reverse): {total_returned_kwh}")
+            self.log.debug("---")
 
             self._lastUpdate = time.time()
         except (
@@ -273,8 +283,9 @@ class DbusShellyEmService:
             requests.exceptions.Timeout,
             ConnectionError,
         ) as e:
-            logging.critical(
-                f"Error getting data from Shelly at {self.shelly_base} - check network or device status. Setting power values to 0. Details: {e}",
+            self.log.critical(
+                f"Error getting data from Shelly at {self.shelly_base} - check network or device status. "
+                f"Setting power values to 0. Details: {e}",
                 exc_info=e,
             )
             self._dbusservice["/Ac/L1/Power"] = 0
@@ -287,13 +298,12 @@ class DbusShellyEmService:
                 self._dbusservice["/UpdateIndex"] + 1
             ) % 256
         except Exception as e:
-            logging.critical("Unhandled exception in _update", exc_info=e)
-
+            self.log.critical("Unhandled exception in _update", exc_info=e)
         # return true, otherwise add_timeout will be removed from GObject - see docs http://library.isr.ist.utl.pt/docs/pygtk2reference/gobject-functions.html#function-gobject--timeout-add
         return True
 
     def _handlechangedvalue(self, path, value):
-        logging.debug(f"someone else updated {path} to {value}")
+        self.log.debug(f"someone else updated {path} to {value}")
         return True  # accept the change
 
 
@@ -314,29 +324,11 @@ def load_config(path):
 def getLogLevel():
     cp = configparser.ConfigParser()
     cp.read(CONFIG_PATH)
-    if cp.has_section("global"):
-        level_str = cp["global"].get("LogLevel", "INFO")
-    else:
-        level_str = "INFO"
-
+    level_str = (
+        cp["global"].get("LogLevel", "INFO") if cp.has_section("global") else "INFO"
+    )
     try:
         level = logging.getLevelName(level_str)
-        if isinstance(level, str):
-            return logging.INFO
-        return level
-    except Exception:
-        return logging.INFO
-
-    cp = configparser.ConfigParser()
-    cp.read(CONFIG_PATH)
-    if cp.has_section("global"):
-        level_str = cp["global"].get("LogLevel", "INFO")
-    else:
-        level_str = "INFO"
-
-    try:
-        level = logging.getLevelName(level_str)
-        # getLevelName returns the same string if not a valid level; guard it
         if isinstance(level, str):
             return logging.INFO
         return level
@@ -386,11 +378,7 @@ def main():
         for name, d in devices:
             role = d.get("Role", "grid").strip().lower()
             logging.info(
-                "Starting device '%s' (role=%s, instance=%s, host=%s)",
-                name,
-                role,
-                d.get("DeviceInstance"),
-                d.get("Host"),
+                f"Starting device '{name}' (role={role}, instance={d.get('DeviceInstance')}, host={d.get('Host')})"
             )
             svc = DbusShellyEmService(
                 device_cfg=d,
@@ -405,6 +393,7 @@ def main():
                     "/Ac/L1/Current": {"initial": 0, "textformat": _a},
                     "/Ac/L1/Power": {"initial": 0, "textformat": _w},
                 },
+                dev_name=name,
             )
             services.append(svc)
 
