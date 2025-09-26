@@ -196,47 +196,30 @@ class DbusShellyEmService:
 
     def _update(self):
         try:
-            # get data from Shelly 3em
+            # fetch data from Shelly EM
             meter_data = self._getShellyData()
 
-            try:
-                remapL1 = int(self.config["ONPREMISE"]["L1Position"])
-            except KeyError:
-                remapL1 = 1
-
-            if remapL1 > 1:
-                old_l1 = meter_data["emeters"][0]
-                meter_data["emeters"][0] = meter_data["emeters"][remapL1 - 1]
-                meter_data["emeters"][remapL1 - 1] = old_l1
+            # Select configured EM channel (0 or 1) and use it as L1
+            ch = self.channel_idx
+            em_list = meter_data.get("emeters", [])
+            if not isinstance(em_list, list) or len(em_list) <= ch:
+                raise ValueError("Shelly status has no emeters[%d]" % ch)
+            em = em_list[ch]
 
             # send data to DBus
-            self._dbusservice["/Ac/Power"] = meter_data["total_power"]
-            self._dbusservice["/Ac/L1/Voltage"] = meter_data["emeters"][0]["voltage"]
-            self._dbusservice["/Ac/L2/Voltage"] = meter_data["emeters"][1]["voltage"]
-            self._dbusservice["/Ac/L3/Voltage"] = meter_data["emeters"][2]["voltage"]
-            self._dbusservice["/Ac/L1/Current"] = meter_data["emeters"][0]["current"]
-            self._dbusservice["/Ac/L2/Current"] = meter_data["emeters"][1]["current"]
-            self._dbusservice["/Ac/L3/Current"] = meter_data["emeters"][2]["current"]
-            self._dbusservice["/Ac/L1/Power"] = meter_data["emeters"][0]["power"]
-            self._dbusservice["/Ac/L2/Power"] = meter_data["emeters"][1]["power"]
-            self._dbusservice["/Ac/L3/Power"] = meter_data["emeters"][2]["power"]
+            self._dbusservice["/Ac/Power"] = float(em.get("power", 0) or 0)
+            self._dbusservice["/Ac/Voltage"] = float(em.get("voltage", 0) or 0)
+            self._dbusservice["/Ac/Current"] = float(em.get("current", 0) or 0)
+
+            self._dbusservice["/Ac/L1/Voltage"] = float(em.get("voltage", 0) or 0)
+            self._dbusservice["/Ac/L1/Current"] = float(em.get("current", 0) or 0)
+            self._dbusservice["/Ac/L1/Power"] = float(em.get("power", 0) or 0)
+
             self._dbusservice["/Ac/L1/Energy/Forward"] = (
-                meter_data["emeters"][0]["total"] / 1000
-            )
-            self._dbusservice["/Ac/L2/Energy/Forward"] = (
-                meter_data["emeters"][1]["total"] / 1000
-            )
-            self._dbusservice["/Ac/L3/Energy/Forward"] = (
-                meter_data["emeters"][2]["total"] / 1000
+                float(em.get("total", 0) or 0) / 1000.0
             )
             self._dbusservice["/Ac/L1/Energy/Reverse"] = (
-                meter_data["emeters"][0]["total_returned"] / 1000
-            )
-            self._dbusservice["/Ac/L2/Energy/Reverse"] = (
-                meter_data["emeters"][1]["total_returned"] / 1000
-            )
-            self._dbusservice["/Ac/L3/Energy/Reverse"] = (
-                meter_data["emeters"][2]["total_returned"] / 1000
+                float(em.get("total_returned", 0) or 0) / 1000.0
             )
 
             # Old version
@@ -288,8 +271,10 @@ class DbusShellyEmService:
                 exc_info=e,
             )
             self._dbusservice["/Ac/L1/Power"] = 0
-            self._dbusservice["/Ac/L2/Power"] = 0
-            self._dbusservice["/Ac/L3/Power"] = 0
+            self._dbusservice["/Ac/Voltage"] = 0
+            self._dbusservice["/Ac/Current"] = 0
+            self._dbusservice["/Ac/L1/Voltage"] = 0
+            self._dbusservice["/Ac/L1/Current"] = 0
             self._dbusservice["/Ac/Power"] = 0
             self._dbusservice["/UpdateIndex"] = (
                 self._dbusservice["/UpdateIndex"] + 1
@@ -359,20 +344,10 @@ def main():
                 "/Ac/Current": {"initial": 0, "textformat": _a},
                 "/Ac/Voltage": {"initial": 0, "textformat": _v},
                 "/Ac/L1/Voltage": {"initial": 0, "textformat": _v},
-                "/Ac/L2/Voltage": {"initial": 0, "textformat": _v},
-                "/Ac/L3/Voltage": {"initial": 0, "textformat": _v},
                 "/Ac/L1/Current": {"initial": 0, "textformat": _a},
-                "/Ac/L2/Current": {"initial": 0, "textformat": _a},
-                "/Ac/L3/Current": {"initial": 0, "textformat": _a},
                 "/Ac/L1/Power": {"initial": 0, "textformat": _w},
-                "/Ac/L2/Power": {"initial": 0, "textformat": _w},
-                "/Ac/L3/Power": {"initial": 0, "textformat": _w},
                 "/Ac/L1/Energy/Forward": {"initial": 0, "textformat": _kwh},
-                "/Ac/L2/Energy/Forward": {"initial": 0, "textformat": _kwh},
-                "/Ac/L3/Energy/Forward": {"initial": 0, "textformat": _kwh},
                 "/Ac/L1/Energy/Reverse": {"initial": 0, "textformat": _kwh},
-                "/Ac/L2/Energy/Reverse": {"initial": 0, "textformat": _kwh},
-                "/Ac/L3/Energy/Reverse": {"initial": 0, "textformat": _kwh},
             }
         )
 
