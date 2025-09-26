@@ -31,9 +31,9 @@ if VIC_TRON_PATH not in sys.path:
 from vedbus import VeDbusService
 
 
-class DbusShelly3emService:
+class DbusShellyEmService:
     def __init__(
-        self, paths, productname="Shelly 3EM", connection="Shelly 3EM HTTP JSON service"
+        self, paths, productname="Shelly EM", connection="Shelly EM HTTP JSON service"
     ):
         self.config = self._getConfig()
         deviceinstance = int(self.config["DEFAULT"]["DeviceInstance"])
@@ -66,6 +66,9 @@ class DbusShelly3emService:
         username = self.config["ONPREMISE"].get("Username", "").strip()
         password = self.config["ONPREMISE"].get("Password", "")
         self.auth = (username, password) if username else None
+
+        # Read selected channel (0 or 1) for Shelly EM
+        self.channel_idx = self._getSelectedChannel()
 
         self._dbusservice = VeDbusService(
             "{}.http_{:02d}".format(servicename, deviceinstance)
@@ -141,6 +144,17 @@ class DbusShelly3emService:
     def _getShellyPosition(self):
         value = self.config["DEFAULT"].get("Position", "0").strip()
         return int(value or 0)
+
+    def _getSelectedChannel(self):
+        try:
+            value = self.config["ONPREMISE"].get("Channel", "0").strip()
+            channel = int(value or 0)
+        except Exception:
+            channel = 0
+        if channel not in (0, 1):
+            logging.warning("Invalid Channel '%s' in config; defaulting to 0", value)
+            channel = 0
+        return channel
 
     def _getShellyData(self):
         URL = self.shelly_base + "/status"
@@ -331,7 +345,7 @@ def main():
         _v = lambda p, v: (str(round(v, 1)) + " V")
 
         # start our main-service
-        pvac_output = DbusShelly3emService(
+        pvac_output = DbusShellyEmService(
             paths={
                 "/Ac/Energy/Forward": {
                     "initial": 0,
