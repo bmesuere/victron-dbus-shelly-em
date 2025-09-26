@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # vim: ts=2 sw=2 et
 
+import math
 import platform
 import logging
 import sys
@@ -9,6 +10,13 @@ import time
 import requests  # HTTP GET
 import configparser  # INI config
 from gi.repository import GLib as gobject
+
+# Victron libs (velib_python)
+# Use absolute path;
+VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
+if VIC_TRON_PATH not in sys.path:
+    sys.path.insert(1, VIC_TRON_PATH)
+from vedbus import VeDbusService
 
 # Paths & constants
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -22,27 +30,21 @@ DEVICE_TYPE_ET340 = 345
 
 # Networking
 REQUEST_TIMEOUT_SECONDS = 5
-
-# Victron libs (velib_python)
-# Use absolute path;
-VIC_TRON_PATH = "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python"
-if VIC_TRON_PATH not in sys.path:
-    sys.path.insert(1, VIC_TRON_PATH)
-from vedbus import VeDbusService
+REFRESH_INTERVAL_MS = 500
 
 
-class DbusShelly3emService:
+class DbusShellyEmService:
     def __init__(
-        self, paths, productname="Shelly 3EM", connection="Shelly 3EM HTTP JSON service"
+        self, paths, productname="Shelly EM", connection="Shelly EM HTTP JSON service"
     ):
         self.config = self._getConfig()
-        deviceinstance = int(self.config["DEFAULT"]["DeviceInstance"])
-        customname = self.config["DEFAULT"]["CustomName"]
-        role = self.config["DEFAULT"]["Role"]
+        deviceinstance = int(self.config["DEFAULT"]["DeviceInstance"])  # required
+        customname = self.config["DEFAULT"].get("CustomName", "Shelly EM")
+        role = self.config["DEFAULT"].get("Role", "grid")
 
         allowed_roles = ["pvinverter", "grid"]
         if role in allowed_roles:
-            servicename = "com.victronenergy." + role
+            servicename = f"com.victronenergy.{role}"
         else:
             logging.error(
                 "Configured Role '%s' is not in the allowed list %s",
@@ -62,32 +64,31 @@ class DbusShelly3emService:
 
         # Shelly connection settings derived once
         host = self.config["ONPREMISE"]["Host"].strip()
-        self.shelly_base = "http://%s" % host
+        self.shelly_base = f"http://{host}"
         username = self.config["ONPREMISE"].get("Username", "").strip()
         password = self.config["ONPREMISE"].get("Password", "")
         self.auth = (username, password) if username else None
 
-        self._dbusservice = VeDbusService(
-            "{}.http_{:02d}".format(servicename, deviceinstance)
-        )
+        # Read selected channel (0 or 1) for Shelly EM
+        self.channel_idx = self._getSelectedChannel()
+
+        self._dbusservice = VeDbusService(f"{servicename}.http_{deviceinstance:02d}")
         self._paths = paths
 
-        logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
+        logging.debug(f"{servicename} /DeviceInstance = {deviceinstance}")
 
         # Create the management objects, as specified in the ccgx dbus-api document
         self._dbusservice.add_path("/Mgmt/ProcessName", __file__)
         self._dbusservice.add_path(
             "/Mgmt/ProcessVersion",
-            "Unknown version, and running on Python " + platform.python_version(),
+            f"Unknown version, and running on Python {platform.python_version()}",
         )
         self._dbusservice.add_path("/Mgmt/Connection", connection)
 
         # Create the mandatory objects
         self._dbusservice.add_path("/DeviceInstance", deviceinstance)
         self._dbusservice.add_path("/ProductId", productid)
-        self._dbusservice.add_path(
-            "/DeviceType", DEVICE_TYPE_ET340
-        )  # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Energy Meter
+        self._dbusservice.add_path("/DeviceType", DEVICE_TYPE_ET340)
         self._dbusservice.add_path("/ProductName", productname)
         self._dbusservice.add_path("/CustomName", customname)
         self._dbusservice.add_path("/Latency", None)
@@ -115,7 +116,7 @@ class DbusShelly3emService:
         self._lastUpdate = 0
 
         # add _update function 'timer'
-        gobject.timeout_add(500, self._update)  # pause 500ms before the next request
+        gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
 
         # add _signOfLife 'timer' to get feedback in log every 5minutes
         gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
@@ -142,6 +143,35 @@ class DbusShelly3emService:
         value = self.config["DEFAULT"].get("Position", "0").strip()
         return int(value or 0)
 
+    def _getSelectedChannel(self):
+        try:
+            value = self.config["ONPREMISE"].get("Channel", "0").strip()
+            channel = int(value or 0)
+        except Exception:
+            channel = 0
+        if channel not in (0, 1):
+            logging.warning("Invalid Channel '%s' in config; defaulting to 0", value)
+            channel = 0
+        return channel
+
+    def _calc_current(self, power: float, reactive: float, voltage: float) -> float:
+        """Compute RMS current from active power (W), reactive power (var) and voltage (V).
+        Uses S = sqrt(P^2 + Q^2) to avoid division by pf≈0; I = S / V.
+        Returns 0.0 if voltage ≤ 0 or inputs are not finite.
+        """
+        try:
+            p = float(power or 0.0)
+            q = float(reactive or 0.0)
+            v = float(voltage or 0.0)
+        except Exception:
+            return 0.0
+        if not math.isfinite(p) or not math.isfinite(q) or not math.isfinite(v):
+            return 0.0
+        if v <= 0.0:
+            return 0.0
+        S = math.hypot(p, q)  # sqrt(p*p + q*q)
+        return S / v
+
     def _getShellyData(self):
         URL = self.shelly_base + "/status"
 
@@ -166,100 +196,81 @@ class DbusShelly3emService:
         try:
             meter_data = r.json()
         except ValueError as e:
-            raise ValueError("Invalid JSON from Shelly at %s: %s" % (URL, e))
+            raise ValueError(f"Invalid JSON from Shelly at {URL}: {e}")
 
         if not isinstance(meter_data, dict):
-            raise ValueError("Unexpected JSON structure from Shelly at %s" % (URL))
+            raise ValueError(f"Unexpected JSON structure from Shelly at {URL}")
 
         return meter_data
 
     def _signOfLife(self):
         logging.info("--- Start: sign of life ---")
-        logging.info("Last _update() call: %s" % (self._lastUpdate))
-        logging.info("Last '/Ac/Power': %s" % (self._dbusservice["/Ac/Power"]))
+        logging.info(f"Last _update() call: {self._lastUpdate}")
+        logging.info(f"Last '/Ac/Power': {self._dbusservice['/Ac/Power']}")
+        logging.info(f"Last '/Ac/Voltage': {self._dbusservice['/Ac/Voltage']}")
+        logging.info(f"Last '/Ac/Current': {self._dbusservice['/Ac/Current']}")
+        logging.info(
+            f"Last '/Ac/Energy/Forward': {self._dbusservice['/Ac/Energy/Forward']}"
+        )
+        logging.info(
+            f"Last '/Ac/Energy/Reverse': {self._dbusservice['/Ac/Energy/Reverse']}"
+        )
         logging.info("--- End: sign of life ---")
         return True
 
     def _update(self):
         try:
-            # get data from Shelly 3em
+            # Fetch data from Shelly EM
             meter_data = self._getShellyData()
 
-            try:
-                remapL1 = int(self.config["ONPREMISE"]["L1Position"])
-            except KeyError:
-                remapL1 = 1
+            # Select configured EM channel (0 or 1) and use it as L1
+            ch = self.channel_idx
+            em_list = meter_data.get("emeters", [])
+            if not isinstance(em_list, list) or len(em_list) <= ch:
+                raise ValueError(f"Shelly status has no emeters[{ch}]")
+            em = em_list[ch]
 
-            if remapL1 > 1:
-                old_l1 = meter_data["emeters"][0]
-                meter_data["emeters"][0] = meter_data["emeters"][remapL1 - 1]
-                meter_data["emeters"][remapL1 - 1] = old_l1
+            # Bail out if Shelly marks this sample invalid
+            if not bool(em.get("is_valid", True)):
+                logging.warning(
+                    "Shelly channel %d reports is_valid=false; skipping update", ch
+                )
+                return True
 
-            # send data to DBus
-            self._dbusservice["/Ac/Power"] = meter_data["total_power"]
-            self._dbusservice["/Ac/L1/Voltage"] = meter_data["emeters"][0]["voltage"]
-            self._dbusservice["/Ac/L2/Voltage"] = meter_data["emeters"][1]["voltage"]
-            self._dbusservice["/Ac/L3/Voltage"] = meter_data["emeters"][2]["voltage"]
-            self._dbusservice["/Ac/L1/Current"] = meter_data["emeters"][0]["current"]
-            self._dbusservice["/Ac/L2/Current"] = meter_data["emeters"][1]["current"]
-            self._dbusservice["/Ac/L3/Current"] = meter_data["emeters"][2]["current"]
-            self._dbusservice["/Ac/L1/Power"] = meter_data["emeters"][0]["power"]
-            self._dbusservice["/Ac/L2/Power"] = meter_data["emeters"][1]["power"]
-            self._dbusservice["/Ac/L3/Power"] = meter_data["emeters"][2]["power"]
-            self._dbusservice["/Ac/L1/Energy/Forward"] = (
-                meter_data["emeters"][0]["total"] / 1000
-            )
-            self._dbusservice["/Ac/L2/Energy/Forward"] = (
-                meter_data["emeters"][1]["total"] / 1000
-            )
-            self._dbusservice["/Ac/L3/Energy/Forward"] = (
-                meter_data["emeters"][2]["total"] / 1000
-            )
-            self._dbusservice["/Ac/L1/Energy/Reverse"] = (
-                meter_data["emeters"][0]["total_returned"] / 1000
-            )
-            self._dbusservice["/Ac/L2/Energy/Reverse"] = (
-                meter_data["emeters"][1]["total_returned"] / 1000
-            )
-            self._dbusservice["/Ac/L3/Energy/Reverse"] = (
-                meter_data["emeters"][2]["total_returned"] / 1000
-            )
+            p = float(em.get("power", 0) or 0)
+            v = float(em.get("voltage", 0) or 0)
+            q = float(em.get("reactive", 0) or 0)
 
-            # Old version
-            # self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/L1/Energy/Forward'] + self._dbusservice['/Ac/L2/Energy/Forward'] + self._dbusservice['/Ac/L3/Energy/Forward']
-            # self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/L1/Energy/Reverse'] + self._dbusservice['/Ac/L2/Energy/Reverse'] + self._dbusservice['/Ac/L3/Energy/Reverse']
+            # Shelly doesn't report current, so we calculate it
+            i = self._calc_current(p, q, v)
 
-            # New Version - from xris99
-            # Calc = 60min * 60 sec / 0.500 (refresh interval of 500ms) * 1000
-            if self._dbusservice["/Ac/Power"] > 0:
-                self._dbusservice["/Ac/Energy/Forward"] = self._dbusservice[
-                    "/Ac/Energy/Forward"
-                ] + (self._dbusservice["/Ac/Power"] / (60 * 60 / 0.5 * 1000))
-            if self._dbusservice["/Ac/Power"] < 0:
-                self._dbusservice["/Ac/Energy/Reverse"] = self._dbusservice[
-                    "/Ac/Energy/Reverse"
-                ] + (self._dbusservice["/Ac/Power"] * -1 / (60 * 60 / 0.5 * 1000))
+            total_kwh = float(em.get("total", 0) or 0) / 1000.0
+            total_returned_kwh = float(em.get("total_returned", 0) or 0) / 1000.0
 
-            # logging
-            logging.debug(
-                "House Consumption (/Ac/Power): %s" % (self._dbusservice["/Ac/Power"])
-            )
-            logging.debug(
-                "House Forward (/Ac/Energy/Forward): %s"
-                % (self._dbusservice["/Ac/Energy/Forward"])
-            )
-            logging.debug(
-                "House Reverse (/Ac/Energy/Reverse): %s"
-                % (self._dbusservice["/Ac/Energy/Reverse"])
-            )
-            logging.debug("---")
+            # Send data to DBus
+            self._dbusservice["/Ac/Power"] = p
+            self._dbusservice["/Ac/Voltage"] = v
+            self._dbusservice["/Ac/Current"] = i
 
-            # increment UpdateIndex - to show that new data is available an wrap
+            self._dbusservice["/Ac/L1/Power"] = p
+            self._dbusservice["/Ac/L1/Voltage"] = v
+            self._dbusservice["/Ac/L1/Current"] = i
+
+            self._dbusservice["/Ac/Energy/Forward"] = total_kwh
+            self._dbusservice["/Ac/Energy/Reverse"] = total_returned_kwh
+
+            # Increment UpdateIndex - to show that new data is available, wraps at 256
             self._dbusservice["/UpdateIndex"] = (
                 self._dbusservice["/UpdateIndex"] + 1
             ) % 256
 
-            # update lastupdate vars
+            logging.debug(f"Consumption (/Ac/Power): {p}")
+            logging.debug(f"Voltage (/Ac/Voltage): {v}")
+            logging.debug(f"Current (/Ac/Current): {i}")
+            logging.debug(f"Forward (/Ac/Energy/Forward): {total_kwh}")
+            logging.debug(f"Reverse (/Ac/Energy/Reverse): {total_returned_kwh}")
+            logging.debug("---")
+
             self._lastUpdate = time.time()
         except (
             ValueError,
@@ -268,26 +279,26 @@ class DbusShelly3emService:
             ConnectionError,
         ) as e:
             logging.critical(
-                "Error getting data from Shelly at %s - check network or device status. Setting power values to 0. Details: %s",
-                self.shelly_base,
-                e,
+                f"Error getting data from Shelly at {self.shelly_base} - check network or device status. Setting power values to 0. Details: {e}",
                 exc_info=e,
             )
             self._dbusservice["/Ac/L1/Power"] = 0
-            self._dbusservice["/Ac/L2/Power"] = 0
-            self._dbusservice["/Ac/L3/Power"] = 0
+            self._dbusservice["/Ac/Voltage"] = 0
+            self._dbusservice["/Ac/Current"] = 0
+            self._dbusservice["/Ac/L1/Voltage"] = 0
+            self._dbusservice["/Ac/L1/Current"] = 0
             self._dbusservice["/Ac/Power"] = 0
             self._dbusservice["/UpdateIndex"] = (
                 self._dbusservice["/UpdateIndex"] + 1
             ) % 256
         except Exception as e:
-            logging.critical("Error at %s", "_update", exc_info=e)
+            logging.critical("Unhandled exception in _update", exc_info=e)
 
         # return true, otherwise add_timeout will be removed from GObject - see docs http://library.isr.ist.utl.pt/docs/pygtk2reference/gobject-functions.html#function-gobject--timeout-add
         return True
 
     def _handlechangedvalue(self, path, value):
-        logging.debug("someone else updated %s to %s" % (path, value))
+        logging.debug(f"someone else updated {path} to {value}")
         return True  # accept the change
 
 
@@ -331,7 +342,7 @@ def main():
         _v = lambda p, v: (str(round(v, 1)) + " V")
 
         # start our main-service
-        pvac_output = DbusShelly3emService(
+        pvac_output = DbusShellyEmService(
             paths={
                 "/Ac/Energy/Forward": {
                     "initial": 0,
@@ -345,26 +356,12 @@ def main():
                 "/Ac/Current": {"initial": 0, "textformat": _a},
                 "/Ac/Voltage": {"initial": 0, "textformat": _v},
                 "/Ac/L1/Voltage": {"initial": 0, "textformat": _v},
-                "/Ac/L2/Voltage": {"initial": 0, "textformat": _v},
-                "/Ac/L3/Voltage": {"initial": 0, "textformat": _v},
                 "/Ac/L1/Current": {"initial": 0, "textformat": _a},
-                "/Ac/L2/Current": {"initial": 0, "textformat": _a},
-                "/Ac/L3/Current": {"initial": 0, "textformat": _a},
                 "/Ac/L1/Power": {"initial": 0, "textformat": _w},
-                "/Ac/L2/Power": {"initial": 0, "textformat": _w},
-                "/Ac/L3/Power": {"initial": 0, "textformat": _w},
-                "/Ac/L1/Energy/Forward": {"initial": 0, "textformat": _kwh},
-                "/Ac/L2/Energy/Forward": {"initial": 0, "textformat": _kwh},
-                "/Ac/L3/Energy/Forward": {"initial": 0, "textformat": _kwh},
-                "/Ac/L1/Energy/Reverse": {"initial": 0, "textformat": _kwh},
-                "/Ac/L2/Energy/Reverse": {"initial": 0, "textformat": _kwh},
-                "/Ac/L3/Energy/Reverse": {"initial": 0, "textformat": _kwh},
             }
         )
 
-        logging.info(
-            "Connected to dbus, and switching over to gobject.MainLoop() (= event based)"
-        )
+        logging.info("Connected to dbus; entering gobject.MainLoop() (event-based)")
         mainloop = gobject.MainLoop()
         mainloop.run()
     except (
@@ -372,9 +369,9 @@ def main():
         requests.exceptions.ConnectionError,
         requests.exceptions.Timeout,
     ) as e:
-        logging.critical("Error in main type %s", str(e))
+        logging.critical(f"Error in main: {e}")
     except Exception as e:
-        logging.critical("Error at %s", "main", exc_info=e)
+        logging.critical("Unhandled exception in main", exc_info=e)
 
 
 if __name__ == "__main__":
