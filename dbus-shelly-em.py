@@ -30,7 +30,7 @@ DEVICE_TYPE_ET340 = 345
 
 # Networking
 REQUEST_TIMEOUT_SECONDS = 5
-REFRESH_INTERVAL_SECONDS = 0.5
+REFRESH_INTERVAL_MS = 500
 
 
 class DbusShellyEmService:
@@ -116,7 +116,7 @@ class DbusShellyEmService:
         self._lastUpdate = 0
 
         # add _update function 'timer'
-        gobject.timeout_add(500, self._update)  # pause 500ms before the next request
+        gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
 
         # add _signOfLife 'timer' to get feedback in log every 5minutes
         gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
@@ -264,14 +264,12 @@ class DbusShellyEmService:
                 self._dbusservice["/UpdateIndex"] + 1
             ) % 256
 
-            logging.debug(
-                "Consumption (/Ac/Power): %s\nVoltage (/Ac/Voltage): %s\nCurrent (/Ac/Current): %s\nForward (/Ac/Energy/Forward): %s\nReverse (/Ac/Energy/Reverse): %s\n---",
-                p,
-                v,
-                i,
-                total_kwh,
-                total_returned_kwh,
-            )
+            logging.debug(f"Consumption (/Ac/Power): {p}")
+            logging.debug(f"Voltage (/Ac/Voltage): {v}")
+            logging.debug(f"Current (/Ac/Current): {i}")
+            logging.debug(f"Forward (/Ac/Energy/Forward): {total_kwh}")
+            logging.debug(f"Reverse (/Ac/Energy/Reverse): {total_returned_kwh}")
+            logging.debug("---")
 
             self._lastUpdate = time.time()
         except (
