@@ -58,7 +58,13 @@ class DbusShellyEmService:
         self.global_cfg = global_cfg
         self.device_cfg = device_cfg
 
-        deviceinstance = int(self.device_cfg.get("DeviceInstance", "40"))
+        di_str = self.device_cfg.get("DeviceInstance", "").strip()
+        if not di_str or not di_str.isdigit():
+            logging.critical(
+                f"Invalid or missing DeviceInstance for section '{dev_name}' — please set a unique integer"
+            )
+            sys.exit(1)
+        deviceinstance = int(di_str)
         customname = self.device_cfg.get("CustomName", "Shelly EM")
         role = self.device_cfg.get("Role", "grid").strip().lower()
 
@@ -66,7 +72,7 @@ class DbusShellyEmService:
         if role in allowed_roles:
             servicename = f"com.victronenergy.{role}"
         else:
-            self.log.critical(
+            logging.critical(
                 f"Configured Role '{role}' is not in the allowed list {allowed_roles}"
             )
             sys.exit(1)
@@ -354,13 +360,21 @@ def getLogLevel():
     level_str = (
         cp["global"].get("LogLevel", "INFO") if cp.has_section("global") else "INFO"
     )
+    if isinstance(level_str, int):
+        return level_str
     try:
-        level = logging.getLevelName(level_str)
-        if isinstance(level, str):
-            return logging.INFO
+        return int(level_str)
+    except (TypeError, ValueError):
+        pass
+    name = str(level_str).strip().upper()
+    level = None
+    if hasattr(logging, "getLevelNamesMapping"):
+        level = logging.getLevelNamesMapping().get(name)
+    if level is None:
+        level = getattr(logging, name, None)
+    if isinstance(level, int):
         return level
-    except Exception:
-        return logging.INFO
+    return logging.INFO
 
 
 def run_device(name, device_cfg, global_cfg):
@@ -432,7 +446,13 @@ def main():
         # Validate unique DeviceInstance values
         seen_instances = set()
         for name, d in devices:
-            inst = int(d.get("DeviceInstance", "0"))
+            inst_str = d.get("DeviceInstance", "").strip()
+            if not inst_str or not inst_str.isdigit():
+                logging.critical(
+                    f"Missing or invalid DeviceInstance in section '{name}' — please set a unique integer."
+                )
+                sys.exit(1)
+            inst = int(inst_str)
             if inst in seen_instances:
                 logging.critical(
                     "Duplicate DeviceInstance %d across sections; ensure uniqueness.",
