@@ -44,7 +44,7 @@ scp -r \
   install.sh \
   restart.sh \
   uninstall.sh \
-  readme.md \
+  README.md \
   root@<gx-ip>:/data/victron-dbus-shelly-em/
 ```
 
