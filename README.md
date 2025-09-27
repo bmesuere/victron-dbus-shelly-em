@@ -31,7 +31,7 @@ Replace `<gx-ip>` with your Venus OS device IP and adjust the local folder name 
 
 ```sh
 # on your PC
-git clone https://github.com/bmesuere/victron-dbus-shelly-em/victron-dbus-shelly-em.git
+git clone https://github.com/bmesuere/victron-dbus-shelly-em.git
 cd victron-dbus-shelly-em
 
 # create the target dir on the GX

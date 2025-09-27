@@ -22,8 +22,7 @@ cat > "${RUN_FILE}" <<'SH'
 #!/bin/sh
 # daemontools run script: exec our Python program; stdout/stderr go to supervise
 exec 2>&1
-# NOTE: The install script rewrites the next line with the absolute path to the main script.
-# PLACEHOLDER_MAIN=
+# NOTE: The install script adds a line below with the absolute path to the main script.
 SH
 # append absolute exec line (python3)
 echo "exec python3 \"${MAIN_PY}\"" >> "${RUN_FILE}"
