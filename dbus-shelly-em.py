@@ -30,7 +30,7 @@ PRODUCT_ID_GRID = 45069
 DEVICE_TYPE_ET340 = 345
 
 # Networking
-REQUEST_TIMEOUT_SECONDS = 5
+REQUEST_TIMEOUT_SECONDS = 1
 REFRESH_INTERVAL_MS = 500
 
 
@@ -139,12 +139,34 @@ class DbusShellyEmService:
             )
 
         self._lastUpdate = 0
+        self._periodic_id = None
+        self._signoflife_id = None
+
         # Set up the main loop with a staggered start to avoid hammering the same Shelly when multiple devices share a host
         jitter_ms = (
             (deviceinstance * 53 + self.channel_idx * 17) % REFRESH_INTERVAL_MS
         ) or 50
         gobject.timeout_add(jitter_ms, self._start_periodic)
-        gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
+
+        # schedule sign-of-life only if > 0 minutes
+        sol_minutes = self._getSignOfLifeInterval()
+        if sol_minutes > 0 and self._signoflife_id is None:
+            try:
+                from gi.repository import GLib
+
+                self._signoflife_id = GLib.timeout_add_seconds(
+                    sol_minutes * 60, self._signOfLife
+                )
+            except Exception:
+                # fallback to millisecond API if seconds API is unavailable
+                self._signoflife_id = gobject.timeout_add(
+                    sol_minutes * 60 * 1000, self._signOfLife
+                )
+            self.log.info(
+                f"Sign-of-life every {sol_minutes} minute(s) (timer id {self._signoflife_id})"
+            )
+        elif sol_minutes <= 0:
+            self.log.info("Sign-of-life disabled (SignOfLifeLog <= 0)")
 
     # ----------------------
     # Config helpers
@@ -231,9 +253,16 @@ class DbusShellyEmService:
         return meter_data["mac"]
 
     def _start_periodic(self):
-        # Register the periodic updater after an initial jitter delay
-        gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
-        return False  # one-shot
+        if self._periodic_id is None:
+            self._periodic_id = gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
+            self.log.info(
+                f"Registered periodic update every {REFRESH_INTERVAL_MS} ms (timer id {self._periodic_id})"
+            )
+        else:
+            self.log.warning(
+                f"Periodic timer already registered (id {self._periodic_id}); skipping duplicate"
+            )
+        return False
 
     def _signOfLife(self):
         # Pretty-print last update timestamp with local time and age
