@@ -31,7 +31,6 @@ DEVICE_TYPE_ET340 = 345
 
 # Networking
 REQUEST_TIMEOUT_SECONDS = 1
-REFRESH_INTERVAL_MS = 500
 
 
 class DeviceAdapter(logging.LoggerAdapter):
@@ -54,9 +53,11 @@ class DbusShellyEmService:
         dev_name: str,
         productname="Shelly EM",
         connection="Shelly EM HTTP JSON service",
+        poll_ms=500,
     ):
         self.global_cfg = global_cfg
         self.device_cfg = device_cfg
+        self.poll_ms = int(poll_ms)
 
         di_str = self.device_cfg.get("DeviceInstance", "").strip()
         if not di_str or not di_str.isdigit():
@@ -144,7 +145,7 @@ class DbusShellyEmService:
 
         # Set up the main loop with a staggered start to avoid hammering the same Shelly when multiple devices share a host
         jitter_ms = (
-            (deviceinstance * 53 + self.channel_idx * 17) % REFRESH_INTERVAL_MS
+            (deviceinstance * 53 + self.channel_idx * 17) % self._poll_ms
         ) or 50
         gobject.timeout_add(jitter_ms, self._start_periodic)
 
@@ -254,9 +255,9 @@ class DbusShellyEmService:
 
     def _start_periodic(self):
         if self._periodic_id is None:
-            self._periodic_id = gobject.timeout_add(REFRESH_INTERVAL_MS, self._update)
+            self._periodic_id = gobject.timeout_add(self._poll_ms, self._update)
             self.log.info(
-                f"Registered periodic update every {REFRESH_INTERVAL_MS} ms (timer id {self._periodic_id})"
+                f"Registered periodic update every {self._poll_ms} ms (timer id {self._periodic_id})"
             )
         else:
             self.log.warning(
@@ -406,10 +407,22 @@ def getLogLevel():
     return logging.INFO
 
 
+def _get_int(d, key, default):
+    try:
+        v = str(d.get(key, str(default))).strip()
+        return int(v)
+    except Exception:
+        return default
+
+
 def run_device(name, device_cfg, global_cfg):
     """Spawned in a separate process to avoid D-Bus root object path ('/') conflicts.
     Each process creates its own VeDbusService and GLib main loop.
     """
+
+    default_poll_ms = _get_int(global_cfg, "PollMs", 500)
+    poll_ms = _get_int(device_cfg, "PollMs", default_poll_ms)
+
     logging.basicConfig(
         format="%(asctime)s,%(msecs)d %(processName)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -449,6 +462,7 @@ def run_device(name, device_cfg, global_cfg):
             "/Ac/L1/Power": {"initial": 0, "textformat": _w},
         },
         dev_name=name,
+        poll_ms=poll_ms,
     )
 
     logging.info("Connected to dbus; entering gobject.MainLoop()")
