@@ -1,97 +1,159 @@
-# dbus-shelly-3em-smartmeter
-Integrate Shelly 3EM smart meter into [Victron Energies Venus OS](https://github.com/victronenergy/venus)
+# victron-dbus-shelly-em
+Integrate Shelly EM meters with [Victron Energy Venus OS](https://github.com/victronenergy/venus).
 
-## Purpose
-With the scripts in this repo it should be easy possible to install, uninstall, restart a service that connects the Shelly 3EM to the VenusOS and GX devices from Victron.
-Idea is pasend on @RalfZim project linked below.
+This service exposes one **D-Bus service per Shelly role** (grid or PV inverter) and supports **multiple devices** — including multiple channels on the **same** Shelly — running side by side.
 
+---
 
+## Highlights
+- **Multi-device config**: define any number of Shellys via `[device:*]` sections.
+- **Grid or PV** roles: publishes to `com.victronenergy.grid.*` or `com.victronenergy.pvinverter.*`.
+- **Shelly EM channels**: pick `Channel = 0` or `1` (two CTs on a single Shelly EM).
+- **Per-device log prefix**: every log line is tagged like `[device:grid:40@192.168.0.62]`.
+- **Robust polling**: short jitter on start to avoid hammering one Shelly; single retry on read timeout.
+- **One process per device**: avoids D-Bus root object (`/`) collisions.
+- **Python 3 only**.
 
-## Inspiration
-This project is my first on GitHub and with the Victron Venus OS, so I took some ideas and approaches from the following projects - many thanks for sharing the knowledge:
-- https://github.com/RalfZim/venus.dbus-fronius-smartmeter
-- https://github.com/victronenergy/dbus-smappee
-- https://github.com/Louisvdw/dbus-serialbattery
-- https://community.victronenergy.com/idea/114716/power-meter-lib-for-modbus-rtu-based-meters-from-a.html - [Old Thread](https://community.victronenergy.com/questions/85564/eastron-sdm630-modbus-energy-meter-community-editi.html)
+---
 
-## How it works
-### My setup
-- Shelly 3EM with latest firmware (20220209-094824/v1.11.8-g8c7bb8d)
-  - 3-Phase installation (normal for Germany)
-  - Connected to Wifi network "A"
-  - IP 192.168.2.13/24  
-- Victron Energy Cerbo GX with Venus OS - Firmware v2.93
-  - No other devices from Victron connected (still waiting for shipment of Multiplus-2)
-  - Connected to Wifi network "A"
-  - IP 192.168.2.20/24
+## Requirements
+- Venus OS / GX device with root access.
+- `python3` available on the target.
+- Shelly EM reachable over the LAN (HTTP `/status`).
 
-### Details / Process
-As mentioned above the script is inspired by @RalfZim fronius smartmeter implementation.
-So what is the script doing:
-- Running as a service
-- connecting to DBus of the Venus OS `com.victronenergy.grid.http_40` or `com.victronenergy.pvinverter.http_40`
-- After successful DBus connection Shelly 3EM is accessed via REST-API - simply the /status is called and a JSON is returned with all details
-  A sample JSON file from Shelly 3EM can be found [here](docs/shelly3em-status-sample.json)
-- Serial/MAC is taken from the response as device serial
-- Paths are added to the DBus with default value 0 - including some settings like name, etc
-- After that a "loop" is started which pulls Shelly 3EM data every 750ms from the REST-API and updates the values in the DBus
+> Tested against Shelly EM firmware with `/status` JSON. This service currently reads a **single channel** per `[device:*]` (you can add multiple device sections pointing to the same host with different `Channel`).
 
-Thats it 😄
+---
 
-### Pictures
-![Tile Overview](img/venus-os-tile-overview.PNG)
-![Remote Console - Overview](img/venus-os-remote-console-overview.PNG) 
-![SmartMeter - Values](img/venus-os-shelly3em-smartmeter.PNG)
-![SmartMeter - Device Details](img/venus-os-shelly3em-smartmeter-devicedetails.PNG)
+## Installation
 
+Replace `<gx-ip>` with your Venus OS device IP and adjust the local folder name if needed. Copy the project directory to your GX device, e.g. under `/data/victron-dbus-shelly-em`, and run the installer.
 
+```sh
+# on your PC
+git clone https://github.com/bmesuere/victron-dbus-shelly-em.git
+cd victron-dbus-shelly-em
 
+# create the target dir on the GX
+ssh root@<gx-ip> 'mkdir -p /data/victron-dbus-shelly-em'
 
-## Install & Configuration
-### Get the code
-Just grap a copy of the main branche and copy them to `/data/dbus-shelly-3em-smartmeter`.
-After that call the install.sh script.
-
-The following script should do everything for you:
+# explicitly copy only the needed files (no .git)
+scp -r \
+  dbus-shelly-em.py \
+  config.ini \
+  install.sh \
+  restart.sh \
+  uninstall.sh \
+  README.md \
+  root@<gx-ip>:/data/victron-dbus-shelly-em/
 ```
-wget https://github.com/fabian-lauer/dbus-shelly-3em-smartmeter/archive/refs/heads/main.zip
-unzip main.zip "dbus-shelly-3em-smartmeter-main/*" -d /data
-mv /data/dbus-shelly-3em-smartmeter-main /data/dbus-shelly-3em-smartmeter
-chmod a+x /data/dbus-shelly-3em-smartmeter/install.sh
-/data/dbus-shelly-3em-smartmeter/install.sh
-rm main.zip
+
+Then, on the GX device:
+
+```sh
+cd /data/victron-dbus-shelly-em
+chmod +x install.sh restart.sh uninstall.sh
+./install.sh
 ```
-⚠️ Check configuration after that - because service is already installed an running and with wrong connection data (host, username, pwd) you will spam the log-file
 
-### Change config.ini
-Within the project there is a file `/data/dbus-shelly-3em-smartmeter/config.ini` - just change the values - most important is the host, username and password in section "ONPREMISE". More details below:
+What `install.sh` does:
+- Writes/updates `service/run` with an **absolute path** and `python3` exec.
+- Links `/service/<folder-name>` → `service/` so daemontools supervises it.
+- Ensures persistence by appending `install.sh` to `/data/rc.local`.
 
-| Section  | Config vlaue | Explanation |
-| ------------- | ------------- | ------------- |
-| DEFAULT  | AccessType | Fixed value 'OnPremise' |
-| DEFAULT  | SignOfLifeLog  | Time in minutes how often a status is added to the log-file `current.log` with log-level INFO |
-| DEFAULT  | CustomName  | Name of your device - usefull if you want to run multiple versions of the script |
-| DEFAULT  | DeviceInstance  | DeviceInstanceNumber e.g. 40 |
-| DEFAULT  | Role | use 'GRID' or 'PVINVERTER' to set the type of the shelly 3EM |
-| DEFAULT  | Position | Available Postions: 0 = AC, 1 = AC-Out 1, AC-Out 2 |
-| DEFAULT  | LogLevel  | Define the level of logging - lookup: https://docs.python.org/3/library/logging.html#levels |
-| ONPREMISE  | Host | IP or hostname of on-premise Shelly 3EM web-interface |
-| ONPREMISE  | Username | Username for htaccess login - leave blank if no username/password required |
-| ONPREMISE  | Password | Password for htaccess login - leave blank if no username/password required |
-| ONPREMISE  | L1Position | Which input on the Shelly in 3-phase grid is supplying a single Multi |
+To restart after config changes:
+```sh
+/data/victron-dbus-shelly-em/restart.sh
+```
 
+To remove the service (code remains on disk):
+```sh
+/data/victron-dbus-shelly-em/uninstall.sh
+```
 
-### Remapping L1
-In a 3-phase grid with a single Multi, Venus OS expects L1 to be supplying the only Multi. This is not always the case. If for example your Multi is supplied by L3 (Input `C` on the Shelly) your GX device will show AC Loads as consuming from both L1 and L3. Setting `L1Position` to the appropriate Shelly input allows for remapping the phases and showing correct data on the GX device.
+---
 
-If your single Multi is connected to the Input `A` on the Shelly you don't need to change this setting. Setting `L1Position` to `2` would swap the `B` CT & Voltage sensors data on the Shelly with the `A` CT & Voltage sensors data on the Shelly. Respectively, setting `L1Position` to `3` would swap `A` and `C` inputs.
+## Configuration
+Create or edit `/data/victron-dbus-shelly-em/config.ini` using the **new format only**.
 
-## Used documentation
-- https://github.com/victronenergy/venus/wiki/dbus#grid   DBus paths for Victron namespace GRID
-- https://github.com/victronenergy/venus/wiki/dbus#pv-inverters   DBus paths for Victron namespace PVINVERTER
-- https://github.com/victronenergy/venus/wiki/dbus-api   DBus API from Victron
-- https://www.victronenergy.com/live/ccgx:root_access   How to get root access on GX device/Venus OS
+### Minimal example (grid + PV; two channels on one Shelly)
+```ini
+[global]
+LogLevel = INFO            ; DEBUG, INFO, WARNING, ERROR, CRITICAL (names or numbers)
+SignOfLifeLog = 1          ; minutes between info dumps to the log (0 disables)
 
-## Discussions on the web
-This module/repository has been posted on the following threads:
-- https://community.victronenergy.com/questions/125793/shelly-3em-smartmeter-with-venusos-cerbo-gx.html
+[device:grid]
+Host = 192.168.0.62
+Username =
+Password =
+Channel = 0                ; 0 or 1
+Role = grid                ; grid | pvinverter
+DeviceInstance = 40        ; must be unique across all devices
+CustomName = Shelly Grid
+Position = 1               ; 0=AC, 1=AC-Out 1, 2=AC-Out 2
+
+[device:pv]
+Host = 192.168.0.62
+Username =
+Password =
+Channel = 1
+Role = pvinverter
+DeviceInstance = 41
+CustomName = Shelly PV
+Position = 0
+```
+
+### Field reference
+| Section | Key             | Meaning |
+|--------:|-----------------|---------|
+| `[global]` | `LogLevel`      | Logging level by name or number. |
+| `[global]` | `SignOfLifeLog` | Every N minutes, log current values and last update time. `0` disables. |
+| `[device:*]` | `Host`        | IP/hostname of the Shelly. |
+| `[device:*]` | `Username`/`Password` | HTTP basic auth if configured on the Shelly (leave blank if not). |
+| `[device:*]` | `Channel`     | Channel index on EM (0/1). For 3EM, configure one section per desired Lx channel. |
+| `[device:*]` | `Role`        | `grid` or `pvinverter` (controls D-Bus namespace). |
+| `[device:*]` | `DeviceInstance` | Unique integer per device; used in the D-Bus service name. |
+| `[device:*]` | `CustomName`  | Shown in D-Bus. |
+| `[device:*]` | `Position`    | Victron “position” value (usually only meaningful for PV inverters). |
+
+> Inline comments `; ...` and `# ...` are supported in values. Numeric fields must remain numeric after stripping comments.
+
+---
+
+## How it works (short version)
+- On start, the launcher reads `config.ini`, validates unique `DeviceInstance` values, and spawns **one process per `[device:*]`**.
+- Each process:
+  - Creates one D-Bus service: `com.victronenergy.<role>.http_<DeviceInstance>`.
+  - Polls `http://<Host>/status` on a 500 ms interval (staggered start), with a **single retry** on read timeout.
+  - Publishes `/Ac/Power`, `/Ac/Voltage`, `/Ac/Current`, and energy counters; current is derived via `I = sqrt(P² + Q²) / V`.
+  - Logs with a per-device prefix.
+
+---
+
+## Troubleshooting
+- **“Can't register the object-path handler for '/'…”**
+  You’re trying to run multiple services in one process. This repo **spawns one process per device** to avoid that. Use the included `install.sh` and don’t wrap it in another supervisor that runs multiple instances in a single process.
+
+- **Read timeouts** when two sections point to the same `Host`:
+  Normal if they fire together; mitigated by the staggered start and one quick retry. If your Wi‑Fi is weak, increase interval (code constant `REFRESH_INTERVAL_MS`).
+
+- **Duplicate DeviceInstance**:
+  The service exits with an explicit error. Use unique integers per section.
+
+- **No logs**:
+  Check `/data/victron-dbus-shelly-em/current.log` and console. `LogLevel` can be set to `DEBUG` for verboser output.
+
+- **Auth issues**:
+  If the Shelly has HTTP auth enabled, set `Username` and `Password`. Leave them blank otherwise.
+
+---
+
+## Development notes
+- Code is Python 3 only and uses the Venus OS `vedbus` library.
+- D-Bus service names follow `com.victronenergy.<role>.http_<DeviceInstance:02d>`.
+- The code accepts inline comments in INI values (e.g. `DeviceInstance = 40 ; unique`).
+
+---
+
+## Credits
+Originally inspired by community projects around Venus OS smart meter integrations. This version is a ground-up refactor for multi-device configs, clean logging, and reliability on Shelly EM/3EM hardware.
