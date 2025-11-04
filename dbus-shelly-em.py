@@ -30,7 +30,7 @@ PRODUCT_ID_GRID = 45069
 DEVICE_TYPE_ET340 = 345
 
 # Networking
-REQUEST_TIMEOUT_SECONDS = 5
+REQUEST_TIMEOUT_SECONDS = 1
 REFRESH_INTERVAL_MS = 500
 
 
@@ -68,7 +68,7 @@ class DbusShellyEmService:
         customname = self.device_cfg.get("CustomName", "Shelly EM")
         role = self.device_cfg.get("Role", "grid").strip().lower()
 
-        allowed_roles = ["pvinverter", "grid"]
+        allowed_roles = ["pvinverter", "grid", "evcharger"]
         if role in allowed_roles:
             servicename = f"com.victronenergy.{role}"
         else:
@@ -77,7 +77,11 @@ class DbusShellyEmService:
             )
             sys.exit(1)
 
-        productid = PRODUCT_ID_PVINVERTER if role == "pvinverter" else PRODUCT_ID_GRID
+        productid = (
+            PRODUCT_ID_PVINVERTER
+            if role == "pvinverter"
+            else PRODUCT_ID_GRID if role == "grid" else 0xFFFF  # generic EV charger
+        )
 
         # Reuse one HTTP session for all requests
         self.session = requests.Session()
